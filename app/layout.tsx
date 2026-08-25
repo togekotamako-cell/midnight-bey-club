@@ -1,15 +1,17 @@
 import "./globals.css";
+import type { Metadata } from "next";
+import type { ReactNode } from "react";
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "MIDNIGHT BEY CLUB",
   description: "NO SLEEP. KEEP SPIN.",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: {
+  children: ReactNode;
+}) {
   return (
     <html lang="ja">
       <body>{children}</body>

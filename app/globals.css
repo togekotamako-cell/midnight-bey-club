@@ -1,0 +1,141 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #05050a;
+  color: #f5f5f7;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+body {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.site-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 50% -10%, rgba(90, 45, 180, 0.35), transparent 40%),
+    linear-gradient(180deg, #08070e 0%, #030307 100%);
+}
+
+.noise {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  z-index: 100;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E");
+}
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  padding: 12px 24px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(5,5,10,0.88);
+  backdrop-filter: blur(16px);
+}
+
+.brand img {
+  display: block;
+  width: 170px;
+  max-height: 52px;
+  object-fit: contain;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+nav a {
+  color: #bdbdc8;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  transition: 0.2s;
+}
+
+nav a:hover {
+  color: #ffffff;
+}
+
+main {
+  width: 100%;
+}
+
+.hero {
+  padding: 80px 24px 50px;
+  text-align: center;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(38px, 7vw, 76px);
+  font-weight: 900;
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+}
+
+.hero p {
+  margin: 20px auto 0;
+  max-width: 620px;
+  color: #9696a5;
+  line-height: 1.7;
+}
+
+.section {
+  width: min(1100px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 70px;
+}
+
+.card {
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.045);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+}
+
+@media (max-width: 700px) {
+  .header {
+    padding: 10px 16px;
+  }
+
+  .brand img {
+    width: 130px;
+  }
+
+  nav {
+    gap: 10px;
+  }
+
+  nav a {
+    font-size: 11px;
+  }
+
+  .hero {
+    padding-top: 55px;
+  }
+}

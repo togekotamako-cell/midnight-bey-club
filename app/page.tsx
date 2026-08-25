@@ -85,6 +85,7 @@ export default function Home() {
 
   const scrollTo = (id: string) => {
     setMenuOpen(false);
+
     document.getElementById(id)?.scrollIntoView({
       behavior: "smooth",
     });
@@ -139,7 +140,9 @@ export default function Home() {
         <div className="hero-glow" />
 
         <div className="hero-content">
-          <p className="eyebrow">MIDNIGHT BEY CLUB / OFFICIAL WEB</p>
+          <p className="eyebrow">
+            MIDNIGHT BEY CLUB / OFFICIAL WEB
+          </p>
 
           <img
             src="/image0.png"
@@ -186,13 +189,24 @@ export default function Home() {
 
         <div className="tournament-grid">
           {tournaments.map((tournament) => (
-            <article className="tournament-card" key={tournament.id}>
+            <article
+              className="tournament-card"
+              key={tournament.id}
+            >
               <div className="card-top">
-                <span className={`status ${tournament.status === "ENTRY OPEN" ? "open" : ""}`}>
+                <span
+                  className={`status ${
+                    tournament.status === "ENTRY OPEN"
+                      ? "open"
+                      : ""
+                  }`}
+                >
                   {tournament.status}
                 </span>
 
-                <span>#{String(tournament.id).padStart(2, "0")}</span>
+                <span>
+                  #{String(tournament.id).padStart(2, "0")}
+                </span>
               </div>
 
               <div className="card-main">
@@ -200,7 +214,9 @@ export default function Home() {
 
                 <h3>{tournament.name}</h3>
 
-                <p className="location">{tournament.location}</p>
+                <p className="location">
+                  {tournament.location}
+                </p>
               </div>
 
               <div className="card-arrow">↗</div>
@@ -229,12 +245,17 @@ export default function Home() {
           </div>
 
           {players.map((player) => (
-            <div className="ranking-row" key={player.name}>
+            <div
+              className="ranking-row"
+              key={player.name}
+            >
               <span className="rank">
                 {String(player.rank).padStart(2, "0")}
               </span>
 
-              <span className="player-name">{player.name}</span>
+              <span className="player-name">
+                {player.name}
+              </span>
 
               <span>{player.wins}</span>
 
@@ -255,6 +276,7 @@ export default function Home() {
         <div className="section-heading">
           <div>
             <p className="eyebrow">THE ARCHIVE</p>
+
             <h2>
               SPIN AFTER
               <br />
@@ -288,7 +310,9 @@ export default function Home() {
 
       <section id="about" className="about-section">
         <div className="about-inner">
-          <p className="eyebrow">MIDNIGHT BEY CLUB</p>
+          <p className="eyebrow">
+            MIDNIGHT BEY CLUB
+          </p>
 
           <img
             src="/image0.png"
@@ -362,7 +386,8 @@ export default function Home() {
           right: 0;
           background: rgba(5, 5, 7, 0.78);
           backdrop-filter: blur(18px);
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          border-bottom: 1px solid
+            rgba(255, 255, 255, 0.08);
         }
 
         .header-inner {
@@ -436,7 +461,8 @@ export default function Home() {
           justify-content: center;
           padding: 130px 24px 70px;
           text-align: center;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          border-bottom: 1px solid
+            rgba(255, 255, 255, 0.08);
         }
 
         .hero-glow {
@@ -494,7 +520,8 @@ export default function Home() {
           align-items: center;
           gap: 24px;
           padding: 16px 22px;
-          border: 1px solid rgba(255, 255, 255, 0.22);
+          border: 1px solid
+            rgba(255, 255, 255, 0.22);
           background: rgba(255, 255, 255, 0.05);
           color: white;
           cursor: pointer;
@@ -554,7 +581,8 @@ export default function Home() {
 
         .tournament-grid {
           display: grid;
-          grid-template-columns: repeat(3, 1fr);
+          grid-template-columns:
+            repeat(3, 1fr);
           gap: 14px;
         }
 
@@ -565,7 +593,8 @@ export default function Home() {
           display: flex;
           flex-direction: column;
           justify-content: space-between;
-          border: 1px solid rgba(255, 255, 255, 0.1);
+          border: 1px solid
+            rgba(255, 255, 255, 0.1);
           background:
             linear-gradient(
               145deg,
@@ -577,7 +606,12 @@ export default function Home() {
 
         .tournament-card:hover {
           transform: translateY(-5px);
-          border-color: rgba(145, 93, 230, 0.5);
+          border-color: rgba(
+            145,
+            93,
+            230,
+            0.5
+          );
         }
 
         .card-top {
@@ -629,17 +663,20 @@ export default function Home() {
         }
 
         .ranking-section {
-          border-top: 1px solid rgba(255, 255, 255, 0.08);
+          border-top: 1px solid
+            rgba(255, 255, 255, 0.08);
         }
 
         .ranking-table {
-          border-top: 1px solid rgba(255, 255, 255, 0.12);
+          border-top: 1px solid
+            rgba(255, 255, 255, 0.12);
         }
 
         .ranking-head,
         .ranking-row {
           display: grid;
-          grid-template-columns: 100px 1fr 120px 120px 100px;
+          grid-template-columns:
+            100px 1fr 120px 120px 100px;
           align-items: center;
         }
 
@@ -649,17 +686,24 @@ export default function Home() {
           font-size: 9px;
           font-weight: 700;
           letter-spacing: 0.18em;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          border-bottom: 1px solid
+            rgba(255, 255, 255, 0.08);
         }
 
         .ranking-row {
           min-height: 82px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          border-bottom: 1px solid
+            rgba(255, 255, 255, 0.08);
           transition: 0.2s;
         }
 
         .ranking-row:hover {
-          background: rgba(116, 64, 201, 0.08);
+          background: rgba(
+            116,
+            64,
+            201,
+            0.08
+          );
         }
 
         .rank {
@@ -688,7 +732,8 @@ export default function Home() {
         }
 
         .history-section {
-          border-top: 1px solid rgba(255, 255, 255, 0.08);
+          border-top: 1px solid
+            rgba(255, 255, 255, 0.08);
         }
 
         .history-section h2 span {
@@ -715,7 +760,11 @@ export default function Home() {
         }
 
         .history-big strong {
-          font-size: clamp(100px, 18vw, 250px);
+          font-size: clamp(
+            100px,
+            18vw,
+            250px
+          );
           line-height: 0.7;
           letter-spacing: -0.08em;
         }
@@ -734,7 +783,8 @@ export default function Home() {
         .about-section {
           position: relative;
           padding: 140px 32px 40px;
-          border-top: 1px solid rgba(255, 255, 255, 0.08);
+          border-top: 1px solid
+            rgba(255, 255, 255, 0.08);
           background:
             radial-gradient(
               circle at 50% 20%,
@@ -759,7 +809,11 @@ export default function Home() {
 
         .about-section h2 {
           margin: 0;
-          font-size: clamp(48px, 8vw, 90px);
+          font-size: clamp(
+            48px,
+            8vw,
+            90px
+          );
           line-height: 0.9;
           letter-spacing: -0.06em;
         }
@@ -775,7 +829,12 @@ export default function Home() {
         .about-line {
           height: 1px;
           margin: 70px 0 25px;
-          background: rgba(255, 255, 255, 0.1);
+          background: rgba(
+            255,
+            255,
+            255,
+            0.1
+          );
         }
 
         .footer-meta {
@@ -810,8 +869,14 @@ export default function Home() {
             align-items: stretch;
             gap: 0;
             padding: 12px 20px 20px;
-            background: rgba(5, 5, 7, 0.97);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(
+              5,
+              5,
+              7,
+              0.97
+            );
+            border-bottom: 1px solid
+              rgba(255, 255, 255, 0.08);
           }
 
           .nav-open {
@@ -821,7 +886,8 @@ export default function Home() {
           .nav button {
             padding: 18px 5px;
             text-align: left;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            border-bottom: 1px solid
+              rgba(255, 255, 255, 0.06);
           }
 
           .hero {
@@ -851,7 +917,8 @@ export default function Home() {
 
           .ranking-head,
           .ranking-row {
-            grid-template-columns: 55px 1fr 55px 55px 55px;
+            grid-template-columns:
+              55px 1fr 55px 55px 55px;
           }
 
           .ranking-head {

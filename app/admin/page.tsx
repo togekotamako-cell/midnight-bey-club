@@ -1,16 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
 
 type Tournament = {
   id: string;
   name: string;
   date: string;
   location: string;
-  status: "ENTRY OPEN" | "UPCOMING" | "FINISHED";
+  status: TournamentStatus;
 };
 
 type Player = {
+  id: string;
   rank: number;
   name: string;
   points: number;
@@ -18,66 +21,10 @@ type Player = {
   tournaments: number;
 };
 
-const initialTournaments: Tournament[] = [
-  {
-    id: "00000000-0000-4000-8000-000000000001",
-    name: "MIDNIGHT BEY CLUB #01",
-    date: "2026.09.12",
-    location: "KANAGAWA",
-    status: "ENTRY OPEN",
-  },
-  {
-    id: "00000000-0000-4000-8000-000000000002",
-    name: "MIDNIGHT BEY CLUB #02",
-    date: "2026.10.10",
-    location: "YOKOHAMA",
-    status: "UPCOMING",
-  },
-  {
-    id: "00000000-0000-4000-8000-000000000003",
-    name: "MIDNIGHT BEY CLUB #00",
-    date: "2026.08.09",
-    location: "YAMATO",
-    status: "FINISHED",
-  },
-];
-
-const initialPlayers: Player[] = [
-  {
-    rank: 1,
-    name: "PLAYER 01",
-    points: 18,
-    wins: 5,
-    tournaments: 7,
-  },
-  {
-    rank: 2,
-    name: "PLAYER 02",
-    points: 14,
-    wins: 4,
-    tournaments: 6,
-  },
-  {
-    rank: 3,
-    name: "PLAYER 03",
-    points: 11,
-    wins: 3,
-    tournaments: 5,
-  },
-  {
-    rank: 4,
-    name: "PLAYER 04",
-    points: 8,
-    wins: 2,
-    tournaments: 4,
-  },
-  {
-    rank: 5,
-    name: "PLAYER 05",
-    points: 6,
-    wins: 1,
-    tournaments: 3,
-  },
+const statusValues: TournamentStatus[] = [
+  "ENTRY OPEN",
+  "UPCOMING",
+  "FINISHED",
 ];
 
 export default function AdminPage() {
@@ -85,13 +32,146 @@ export default function AdminPage() {
     "tournaments"
   );
 
-  const [tournaments, setTournaments] =
-    useState<Tournament[]>(initialTournaments);
+  const [tournaments, setTournaments] = useState<Tournament[]>([]);
+  const [players, setPlayers] = useState<Player[]>([]);
 
-  const [players, setPlayers] =
-    useState<Player[]>(initialPlayers);
-
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+
+  const supabaseUrl =
+    process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  const supabaseKey =
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  const getHeaders = () => ({
+    apikey: supabaseKey || "",
+    Authorization: `Bearer ${supabaseKey || ""}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  });
+
+  const formatDateForInput = (value: string) => {
+    if (!value) return "";
+
+    return value
+      .replace(/\./g, "-")
+      .slice(0, 10);
+  };
+
+  const formatDateForDisplay = (value: string) => {
+    if (!value) return "";
+
+    return value
+      .replace(/-/g, ".")
+      .slice(0, 10);
+  };
+
+  const loadData = async () => {
+    setLoading(true);
+    setMessage("");
+
+    try {
+      if (!supabaseUrl || !supabaseKey) {
+        throw new Error(
+          "Supabaseの環境変数が設定されていません"
+        );
+      }
+
+      const baseUrl = supabaseUrl.replace(/\/$/, "");
+      const headers = getHeaders();
+
+      const tournamentsResponse = await fetch(
+        `${baseUrl}/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=tournament_date.asc`,
+        {
+          method: "GET",
+          headers,
+          cache: "no-store",
+        }
+      );
+
+      if (!tournamentsResponse.ok) {
+        const text = await tournamentsResponse.text();
+
+        throw new Error(
+          `TOURNAMENT LOAD ERROR (${tournamentsResponse.status}): ${text}`
+        );
+      }
+
+      const tournamentData = await tournamentsResponse.json();
+
+      const normalizedTournaments: Tournament[] =
+        (tournamentData || []).map((item: any) => ({
+          id: String(item.id),
+          name: item.name || "",
+          date: formatDateForDisplay(
+            item.tournament_date || ""
+          ),
+          location: item.location || "",
+          status:
+            statusValues.includes(item.status)
+              ? item.status
+              : "UPCOMING",
+        }));
+
+      setTournaments(normalizedTournaments);
+
+      const playersResponse = await fetch(
+        `${baseUrl}/rest/v1/players?select=id,name,rank,points,wins,tournaments&order=rank.asc.nullslast,created_at.asc`,
+        {
+          method: "GET",
+          headers,
+          cache: "no-store",
+        }
+      );
+
+      if (!playersResponse.ok) {
+        const text = await playersResponse.text();
+
+        throw new Error(
+          `PLAYER LOAD ERROR (${playersResponse.status}): ${text}`
+        );
+      }
+
+      const playerData = await playersResponse.json();
+
+      const normalizedPlayers: Player[] =
+        (playerData || []).map(
+          (item: any, index: number) => ({
+            id: String(item.id),
+            rank:
+              item.rank !== null &&
+              item.rank !== undefined
+                ? Number(item.rank)
+                : index + 1,
+            name: item.name || "",
+            points: Number(item.points || 0),
+            wins: Number(item.wins || 0),
+            tournaments: Number(
+              item.tournaments || 0
+            ),
+          })
+        );
+
+      setPlayers(normalizedPlayers);
+    } catch (error) {
+      console.error("LOAD ERROR:", error);
+
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      setMessage(`ERROR: ${errorMessage}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
 
   const updateTournament = (
     id: string,
@@ -111,140 +191,135 @@ export default function AdminPage() {
   };
 
   const updatePlayer = (
-    rank: number,
+    id: string,
     field: keyof Player,
     value: string
   ) => {
     setPlayers((current) =>
-      current.map((player) =>
-        player.rank === rank
-          ? {
-              ...player,
-              [field]:
-                field === "name"
-                  ? value
-                  : Number(value),
-            }
-          : player
-      )
+      current.map((player) => {
+        if (player.id !== id) {
+          return player;
+        }
+
+        if (field === "name") {
+          return {
+            ...player,
+            name: value,
+          };
+        }
+
+        return {
+          ...player,
+          [field]: Number(value),
+        };
+      })
     );
   };
 
+  const saveTournaments = async () => {
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error(
+        "Supabaseの環境変数が設定されていません"
+      );
+    }
+
+    const baseUrl = supabaseUrl.replace(/\/$/, "");
+    const headers = getHeaders();
+
+    for (const tournament of tournaments) {
+      if (!tournament.id) continue;
+
+      const response = await fetch(
+        `${baseUrl}/rest/v1/tournaments?id=eq.${encodeURIComponent(
+          tournament.id
+        )}`,
+        {
+          method: "PATCH",
+          headers: {
+            ...headers,
+            Prefer: "return=minimal",
+          },
+          body: JSON.stringify({
+            name: tournament.name,
+            tournament_date:
+              tournament.date
+                .replace(/\./g, "-")
+                .slice(0, 10),
+            location: tournament.location,
+            status: tournament.status,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+
+        throw new Error(
+          `TOURNAMENT SAVE ERROR (${response.status}): ${text}`
+        );
+      }
+    }
+  };
+
+  const savePlayers = async () => {
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error(
+        "Supabaseの環境変数が設定されていません"
+      );
+    }
+
+    const baseUrl = supabaseUrl.replace(/\/$/, "");
+    const headers = getHeaders();
+
+    for (const player of players) {
+      if (!player.id) continue;
+
+      const response = await fetch(
+        `${baseUrl}/rest/v1/players?id=eq.${encodeURIComponent(
+          player.id
+        )}`,
+        {
+          method: "PATCH",
+          headers: {
+            ...headers,
+            Prefer: "return=minimal",
+          },
+          body: JSON.stringify({
+            name: player.name,
+            points: Number(player.points) || 0,
+            wins: Number(player.wins) || 0,
+            tournaments:
+              Number(player.tournaments) || 0,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+
+        throw new Error(
+          `PLAYER SAVE ERROR (${response.status}): ${text}`
+        );
+      }
+    }
+  };
+
   const saveChanges = async () => {
+    if (saving) return;
+
+    setSaving(true);
     setMessage("SAVING...");
 
     try {
-      const supabaseUrl =
-        process.env.NEXT_PUBLIC_SUPABASE_URL;
-
-      const supabaseKey =
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-      if (!supabaseUrl) {
-        throw new Error(
-          "NEXT_PUBLIC_SUPABASE_URL が設定されていません"
-        );
+      if (tab === "tournaments") {
+        await saveTournaments();
+      } else {
+        await savePlayers();
       }
-
-      if (!supabaseKey) {
-        throw new Error(
-          "NEXT_PUBLIC_SUPABASE_ANON_KEY が設定されていません"
-        );
-      }
-
-      const baseUrl = supabaseUrl.replace(/\/$/, "");
-
-      const headers = {
-        apikey: supabaseKey,
-        Authorization: `Bearer ${supabaseKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Prefer: "return=minimal",
-      };
-
-      /*
-       * --------------------------------
-       * TOURNAMENTS
-       * --------------------------------
-       */
-
-      for (const tournament of tournaments) {
-        // Supabase column is `tournament_date`, and `id` is UUID.
-        // Upsert also works when the table is currently empty.
-        const response = await fetch(
-          `${baseUrl}/rest/v1/tournaments?on_conflict=id`,
-          {
-            method: "POST",
-            headers: {
-              ...headers,
-              Prefer: "resolution=merge-duplicates,return=minimal",
-            },
-            body: JSON.stringify({
-              id: tournament.id,
-              name: tournament.name,
-              tournament_date: tournament.date.replace(/\\./g, "-"),
-              location: tournament.location,
-              status: tournament.status,
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          const text = await response.text();
-
-          throw new Error(
-            `TOURNAMENT SAVE ERROR (${response.status}): ${text}`
-          );
-        }
-      }
-
-      /*
-       * --------------------------------
-       * PLAYERS
-       * --------------------------------
-       */
-
-      for (const player of players) {
-        const response = await fetch(
-          `${baseUrl}/rest/v1/players?rank=eq.${player.rank}`,
-          {
-            method: "PATCH",
-            headers,
-            body: JSON.stringify({
-              name: player.name,
-              points: player.points,
-              wins: player.wins,
-              tournaments: player.tournaments,
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          const text = await response.text();
-
-          throw new Error(
-            `PLAYER SAVE ERROR (${response.status}): ${text}`
-          );
-        }
-      }
-
-      /*
-       * --------------------------------
-       * LOCAL STORAGE
-       * --------------------------------
-       */
-
-      localStorage.setItem(
-        "midnight_tournaments",
-        JSON.stringify(tournaments)
-      );
-
-      localStorage.setItem(
-        "midnight_players",
-        JSON.stringify(players)
-      );
 
       setMessage("SAVED");
+
+      await loadData();
 
       setTimeout(() => {
         setMessage("");
@@ -258,6 +333,8 @@ export default function AdminPage() {
           : String(error);
 
       setMessage(`ERROR: ${errorMessage}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -284,7 +361,9 @@ export default function AdminPage() {
       <nav className="tabs">
         <button
           className={
-            tab === "tournaments" ? "active" : ""
+            tab === "tournaments"
+              ? "active"
+              : ""
           }
           onClick={() =>
             setTab("tournaments")
@@ -295,7 +374,9 @@ export default function AdminPage() {
 
         <button
           className={
-            tab === "players" ? "active" : ""
+            tab === "players"
+              ? "active"
+              : ""
           }
           onClick={() =>
             setTab("players")
@@ -306,185 +387,220 @@ export default function AdminPage() {
       </nav>
 
       <section className="panel">
-        {tab === "tournaments" && (
+        {loading ? (
+          <div className="loading">
+            LOADING DATABASE...
+          </div>
+        ) : (
           <>
-            <div className="sectionTitle">
-              <span>NEXT BATTLES</span>
+            {tab === "tournaments" && (
+              <>
+                <div className="sectionTitle">
+                  <span>NEXT BATTLES</span>
+                  <h2>TOURNAMENTS</h2>
+                </div>
 
-              <h2>TOURNAMENTS</h2>
-            </div>
+                {tournaments.length === 0 ? (
+                  <div className="empty">
+                    NO TOURNAMENTS FOUND
+                  </div>
+                ) : (
+                  <div className="cards">
+                    {tournaments.map(
+                      (tournament) => (
+                        <article
+                          className="card"
+                          key={tournament.id}
+                        >
+                          <label>
+                            TOURNAMENT NAME
 
-            <div className="cards">
-              {tournaments.map((tournament) => (
-                <article
-                  className="card"
-                  key={tournament.id}
-                >
-                  <label>
-                    TOURNAMENT NAME
+                            <input
+                              value={
+                                tournament.name
+                              }
+                              onChange={(e) =>
+                                updateTournament(
+                                  tournament.id,
+                                  "name",
+                                  e.target.value
+                                )
+                              }
+                            />
+                          </label>
 
-                    <input
-                      value={tournament.name}
-                      onChange={(e) =>
-                        updateTournament(
-                          tournament.id,
-                          "name",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
+                          <label>
+                            DATE
 
-                  <label>
-                    DATE
+                            <input
+                              type="date"
+                              value={formatDateForInput(
+                                tournament.date
+                              )}
+                              onChange={(e) =>
+                                updateTournament(
+                                  tournament.id,
+                                  "date",
+                                  formatDateForDisplay(
+                                    e.target.value
+                                  )
+                                )
+                              }
+                            />
+                          </label>
 
-                    <input
-                      value={tournament.date}
-                      onChange={(e) =>
-                        updateTournament(
-                          tournament.id,
-                          "date",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
+                          <label>
+                            LOCATION
 
-                  <label>
-                    LOCATION
+                            <input
+                              value={
+                                tournament.location
+                              }
+                              onChange={(e) =>
+                                updateTournament(
+                                  tournament.id,
+                                  "location",
+                                  e.target.value
+                                )
+                              }
+                            />
+                          </label>
 
-                    <input
-                      value={tournament.location}
-                      onChange={(e) =>
-                        updateTournament(
-                          tournament.id,
-                          "location",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
+                          <label>
+                            STATUS
 
-                  <label>
-                    STATUS
+                            <select
+                              value={
+                                tournament.status
+                              }
+                              onChange={(e) =>
+                                updateTournament(
+                                  tournament.id,
+                                  "status",
+                                  e.target.value
+                                )
+                              }
+                            >
+                              <option value="ENTRY OPEN">
+                                ENTRY OPEN
+                              </option>
 
-                    <select
-                      value={tournament.status}
-                      onChange={(e) =>
-                        updateTournament(
-                          tournament.id,
-                          "status",
-                          e.target.value
-                        )
-                      }
-                    >
-                      <option>
-                        ENTRY OPEN
-                      </option>
+                              <option value="UPCOMING">
+                                UPCOMING
+                              </option>
 
-                      <option>
-                        UPCOMING
-                      </option>
+                              <option value="FINISHED">
+                                FINISHED
+                              </option>
+                            </select>
+                          </label>
 
-                      <option>
-                        FINISHED
-                      </option>
-                    </select>
-                  </label>
-                </article>
-              ))}
-            </div>
-          </>
-        )}
-
-        {tab === "players" && (
-          <>
-            <div className="sectionTitle">
-              <span>THE NUMBERS</span>
-
-              <h2>RANKING</h2>
-            </div>
-
-            <div className="playerList">
-              {players.map((player) => (
-                <div
-                  className="player"
-                  key={player.rank}
-                >
-                  <div className="rank">
-                    {String(player.rank).padStart(
-                      2,
-                      "0"
+                          <div className="id">
+                            ID:{" "}
+                            {tournament.id}
+                          </div>
+                        </article>
+                      )
                     )}
                   </div>
+                )}
+              </>
+            )}
 
-                  <label>
-                    PLAYER
-
-                    <input
-                      value={player.name}
-                      onChange={(e) =>
-                        updatePlayer(
-                          player.rank,
-                          "name",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    POINTS
-
-                    <input
-                      type="number"
-                      value={player.points}
-                      onChange={(e) =>
-                        updatePlayer(
-                          player.rank,
-                          "points",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    WINS
-
-                    <input
-                      type="number"
-                      value={player.wins}
-                      onChange={(e) =>
-                        updatePlayer(
-                          player.rank,
-                          "wins",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    EVENTS
-
-                    <input
-                      type="number"
-                      value={
-                        player.tournaments
-                      }
-                      onChange={(e) =>
-                        updatePlayer(
-                          player.rank,
-                          "tournaments",
-                          e.target.value
-                        )
-                      }
-                    />
-                  </label>
+            {tab === "players" && (
+              <>
+                <div className="sectionTitle">
+                  <span>THE NUMBERS</span>
+                  <h2>RANKING</h2>
                 </div>
-              ))}
-            </div>
+
+                {players.length === 0 ? (
+                  <div className="empty">
+                    NO PLAYERS FOUND
+                  </div>
+                ) : (
+                  <div className="playerList">
+                    {players.map((player) => (
+                      <div
+                        className="player"
+                        key={player.id}
+                      >
+                        <div className="rank">
+                          {String(
+                            player.rank
+                          ).padStart(2, "0")}
+                        </div>
+
+                        <label>
+                          PLAYER
+
+                          <input
+                            value={player.name}
+                            onChange={(e) =>
+                              updatePlayer(
+                                player.id,
+                                "name",
+                                e.target.value
+                              )
+                            }
+                          />
+                        </label>
+
+                        <label>
+                          POINTS
+
+                          <input
+                            type="number"
+                            value={player.points}
+                            onChange={(e) =>
+                              updatePlayer(
+                                player.id,
+                                "points",
+                                e.target.value
+                              )
+                            }
+                          />
+                        </label>
+
+                        <label>
+                          WINS
+
+                          <input
+                            type="number"
+                            value={player.wins}
+                            onChange={(e) =>
+                              updatePlayer(
+                                player.id,
+                                "wins",
+                                e.target.value
+                              )
+                            }
+                          />
+                        </label>
+
+                        <label>
+                          EVENTS
+
+                          <input
+                            type="number"
+                            value={
+                              player.tournaments
+                            }
+                            onChange={(e) =>
+                              updatePlayer(
+                                player.id,
+                                "tournaments",
+                                e.target.value
+                              )
+                            }
+                          />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </>
         )}
 
@@ -504,8 +620,11 @@ export default function AdminPage() {
           <button
             className="save"
             onClick={saveChanges}
+            disabled={saving || loading}
           >
-            SAVE CHANGES
+            {saving
+              ? "SAVING..."
+              : "SAVE CHANGES"}
           </button>
         </div>
       </section>
@@ -634,6 +753,14 @@ export default function AdminPage() {
           border-color: #9d6cff;
         }
 
+        .id {
+          margin-top: 5px;
+          color: #51485c;
+          font-size: 9px;
+          line-height: 1.5;
+          word-break: break-all;
+        }
+
         .playerList {
           border-top: 1px solid #292331;
         }
@@ -689,9 +816,23 @@ export default function AdminPage() {
           white-space: nowrap;
         }
 
-        .save:hover {
+        .save:hover:not(:disabled) {
           background: #9d6cff;
           color: white;
+        }
+
+        .save:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+
+        .loading,
+        .empty {
+          padding: 80px 20px;
+          text-align: center;
+          color: #8d8398;
+          letter-spacing: 3px;
+          font-size: 11px;
         }
 
         @media (max-width: 900px) {

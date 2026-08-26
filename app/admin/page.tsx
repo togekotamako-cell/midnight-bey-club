@@ -97,7 +97,48 @@ export default function AdminPage() {
     );
   };
 
-  const saveChanges = () => {
+  const saveChanges = async () => {
+  try {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error("Supabase environment variables are missing");
+    }
+
+    const headers = {
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    };
+
+    const tournamentResponse = await fetch(
+      `${supabaseUrl}/rest/v1/tournaments?on_conflict=id`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(tournaments),
+      }
+    );
+
+    if (!tournamentResponse.ok) {
+      throw new Error(await tournamentResponse.text());
+    }
+
+    const playerResponse = await fetch(
+      `${supabaseUrl}/rest/v1/players?on_conflict=rank`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(players),
+      }
+    );
+
+    if (!playerResponse.ok) {
+      throw new Error(await playerResponse.text());
+    }
+
     localStorage.setItem(
       "midnight_tournaments",
       JSON.stringify(tournaments)
@@ -113,7 +154,11 @@ export default function AdminPage() {
     setTimeout(() => {
       setMessage("");
     }, 2500);
-  };
+  } catch (error) {
+    console.error(error);
+    setMessage("SAVE ERROR");
+  }
+};
 
   return (
     <main className="admin">

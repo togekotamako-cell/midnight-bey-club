@@ -1,967 +1,675 @@
-"use client";
+function doGet() {
+  return HtmlService
+    .createHtmlOutputFromFile("index")
+    .setTitle("夜更かしベイブレぇど")
+    .addMetaTag("viewport", "width=device-width, initial-scale=1");
+}
 
-import { useState } from "react";
+/* =========================
+   初期設定
+========================= */
 
-type Tournament = {
-  id: number;
-  name: string;
-  date: string;
-  location: string;
-  status: "ENTRY OPEN" | "UPCOMING" | "FINISHED";
-};
+function setupTournament() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const names = ["大会", "選手", "対戦", "順位", "設定"];
 
-type Player = {
-  rank: number;
-  name: string;
-  points: number;
-  wins: number;
-  tournaments: number;
-};
+  names.forEach(function(name) {
+    if (!ss.getSheetByName(name)) ss.insertSheet(name);
+  });
 
-const tournaments: Tournament[] = [
-  {
-    id: 1,
-    name: "MIDNIGHT BEY CLUB #01",
-    date: "2026.09.12",
-    location: "KANAGAWA",
-    status: "ENTRY OPEN",
-  },
-  {
-    id: 2,
-    name: "MIDNIGHT BEY CLUB #02",
-    date: "2026.10.10",
-    location: "YOKOHAMA",
-    status: "UPCOMING",
-  },
-  {
-    id: 3,
-    name: "MIDNIGHT BEY CLUB #00",
-    date: "2026.08.09",
-    location: "YAMATO",
-    status: "FINISHED",
-  },
-];
+  const tournament = ss.getSheetByName("大会");
+  const players = ss.getSheetByName("選手");
+  const matches = ss.getSheetByName("対戦");
+  const ranking = ss.getSheetByName("順位");
+  const settings = ss.getSheetByName("設定");
 
-const players: Player[] = [
-  {
-    rank: 1,
-    name: "PLAYER 01",
-    points: 18,
-    wins: 5,
-    tournaments: 7,
-  },
-  {
-    rank: 2,
-    name: "PLAYER 02",
-    points: 14,
-    wins: 4,
-    tournaments: 6,
-  },
-  {
-    rank: 3,
-    name: "PLAYER 03",
-    points: 11,
-    wins: 3,
-    tournaments: 5,
-  },
-  {
-    rank: 4,
-    name: "PLAYER 04",
-    points: 8,
-    wins: 2,
-    tournaments: 4,
-  },
-  {
-    rank: 5,
-    name: "PLAYER 05",
-    points: 6,
-    wins: 1,
-    tournaments: 3,
-  },
-];
+  tournament.clear();
+  players.clear();
+  matches.clear();
+  ranking.clear();
+  settings.clear();
 
-export default function Home() {
-  const [menuOpen, setMenuOpen] = useState(false);
+  tournament.getRange("A1:B10").setValues([
+    ["夜更かしベイブレぇど", ""],
+    ["大会名", "夜更かしベイブレぇど"],
+    ["開催日", ""],
+    ["参加人数", 0],
+    ["ラウンド数", 0],
+    ["勝利条件", 4],
+    ["最大記録点", 6],
+    ["大会状態", "準備中"],
+    ["現在ラウンド", 0],
+    ["作成日時", new Date()]
+  ]);
 
-  const scrollTo = (id: string) => {
-    setMenuOpen(false);
+  players.getRange(1, 1, 1, 7).setValues([[
+    "No.", "選手名", "勝", "敗", "得点", "失点", "得失点差"
+  ]]);
 
-    document.getElementById(id)?.scrollIntoView({
-      behavior: "smooth",
-    });
+  for (let i = 1; i <= 30; i++) {
+    players.getRange(i + 1, 1).setValue(i);
+  }
+
+  matches.getRange(1, 1, 1, 11).setValues([[
+    "Round", "試合No.", "選手A", "選手B", "A得点", "B得点",
+    "勝者", "状態", "Aフィニッシュ", "Bフィニッシュ", "備考"
+  ]]);
+
+  ranking.getRange(1, 1, 1, 8).setValues([[
+    "順位", "選手名", "勝", "敗", "得点", "失点", "得失点差", "勝率"
+  ]]);
+
+  settings.getRange(1, 2, 8, 2).setValues([
+    ["設定値", "内容"],
+    [30, "最大参加人数"],
+    [4, "勝利条件"],
+    [6, "最大記録点"],
+    [1, "スピンフィニッシュ"],
+    [2, "オーバーフィニッシュ"],
+    [2, "バーストフィニッシュ"],
+    [3, "エクストリームフィニッシュ"]
+  ]);
+
+  formatSheets();
+  return "初期設定が完了しました！";
+}
+
+function formatSheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ["大会", "選手", "対戦", "順位", "設定"].forEach(function(name) {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    sheet.getDataRange().setVerticalAlignment("middle");
+    if (sheet.getLastColumn() > 0) {
+      sheet.autoResizeColumns(1, sheet.getLastColumn());
+    }
+  });
+}
+
+/* =========================
+   大会情報
+========================= */
+
+function getTournamentInfo() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("大会");
+  if (!sheet) throw new Error("先にsetupTournamentを実行してください。");
+
+  return {
+    name: String(sheet.getRange("B2").getValue() || ""),
+    date: String(sheet.getRange("B3").getDisplayValue() || ""),
+    players: Number(sheet.getRange("B4").getValue()) || 0,
+    rounds: Number(sheet.getRange("B5").getValue()) || 0,
+    winCondition: Number(sheet.getRange("B6").getValue()) || 4,
+    maxRecord: Number(sheet.getRange("B7").getValue()) || 6,
+    status: String(sheet.getRange("B8").getValue() || "準備中"),
+    round: Number(sheet.getRange("B9").getValue()) || 0
   };
-
-  return (
-    <main className="site">
-      <header className="header">
-        <div className="header-inner">
-          <button
-            className="brand"
-            onClick={() => scrollTo("home")}
-            aria-label="MIDNIGHT BEY CLUB"
-          >
-            <img
-              src="/image0.png"
-              alt="MIDNIGHT BEY CLUB"
-              className="brand-logo"
-            />
-          </button>
-
-          <nav className={`nav ${menuOpen ? "nav-open" : ""}`}>
-            <button onClick={() => scrollTo("tournaments")}>
-              TOURNAMENTS
-            </button>
-
-            <button onClick={() => scrollTo("ranking")}>
-              RANKING
-            </button>
-
-            <button onClick={() => scrollTo("history")}>
-              HISTORY
-            </button>
-
-            <button onClick={() => scrollTo("about")}>
-              ABOUT
-            </button>
-          </nav>
-
-          <button
-            className="menu-button"
-            onClick={() => setMenuOpen(!menuOpen)}
-            aria-label="Menu"
-          >
-            <span />
-            <span />
-          </button>
-        </div>
-      </header>
-
-      <section id="home" className="hero">
-        <div className="hero-glow" />
-
-        <div className="hero-content">
-          <p className="eyebrow">
-            MIDNIGHT BEY CLUB / OFFICIAL WEB
-          </p>
-
-          <img
-            src="/image0.png"
-            alt="MIDNIGHT BEY CLUB"
-            className="hero-logo"
-          />
-
-          <h1>
-            NO SLEEP.
-            <br />
-            KEEP SPIN.
-          </h1>
-
-          <p className="hero-copy">
-            BEYBLADE X COMMUNITY
-            <br />
-            TOURNAMENT / RANKING / ARCHIVE
-          </p>
-
-          <button
-            className="primary-button"
-            onClick={() => scrollTo("tournaments")}
-          >
-            VIEW TOURNAMENTS
-            <span>↗</span>
-          </button>
-        </div>
-
-        <div className="hero-bottom">
-          <span>KANAGAWA / JAPAN</span>
-          <span>EST. 2026</span>
-        </div>
-      </section>
-
-      <section id="tournaments" className="section">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">NEXT BATTLES</p>
-            <h2>TOURNAMENTS</h2>
-          </div>
-
-          <span className="section-number">01</span>
-        </div>
-
-        <div className="tournament-grid">
-          {tournaments.map((tournament) => (
-            <article
-              className="tournament-card"
-              key={tournament.id}
-            >
-              <div className="card-top">
-                <span
-                  className={`status ${
-                    tournament.status === "ENTRY OPEN"
-                      ? "open"
-                      : ""
-                  }`}
-                >
-                  {tournament.status}
-                </span>
-
-                <span>
-                  #{String(tournament.id).padStart(2, "0")}
-                </span>
-              </div>
-
-              <div className="card-main">
-                <p className="date">{tournament.date}</p>
-
-                <h3>{tournament.name}</h3>
-
-                <p className="location">
-                  {tournament.location}
-                </p>
-              </div>
-
-              <div className="card-arrow">↗</div>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section id="ranking" className="section ranking-section">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">THE NUMBERS</p>
-            <h2>RANKING</h2>
-          </div>
-
-          <span className="section-number">02</span>
-        </div>
-
-        <div className="ranking-table">
-          <div className="ranking-head">
-            <span>RANK</span>
-            <span>PLAYER</span>
-            <span>WINS</span>
-            <span>EVENTS</span>
-            <span>PTS</span>
-          </div>
-
-          {players.map((player) => (
-            <div
-              className="ranking-row"
-              key={player.name}
-            >
-              <span className="rank">
-                {String(player.rank).padStart(2, "0")}
-              </span>
-
-              <span className="player-name">
-                {player.name}
-              </span>
-
-              <span>{player.wins}</span>
-
-              <span>{player.tournaments}</span>
-
-              <strong>{player.points}</strong>
-            </div>
-          ))}
-        </div>
-
-        <div className="ranking-note">
-          <span>CUMULATIVE POINTS</span>
-          <span>1ST 3PT / 2ND 2PT / 3RD 1PT</span>
-        </div>
-      </section>
-
-      <section id="history" className="section history-section">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">THE ARCHIVE</p>
-
-            <h2>
-              SPIN AFTER
-              <br />
-              <span>SPIN.</span>
-            </h2>
-          </div>
-
-          <span className="section-number">03</span>
-        </div>
-
-        <div className="history-content">
-          <div className="history-big">
-            <span>2026</span>
-            <strong>01</strong>
-          </div>
-
-          <div className="history-text">
-            <p>
-              MIDNIGHT BEY CLUB is a Beyblade X community
-              built around competition, records and the people
-              who keep the stadium spinning.
-            </p>
-
-            <p>
-              Every tournament becomes part of the archive.
-              Every battle leaves a record.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section id="about" className="about-section">
-        <div className="about-inner">
-          <p className="eyebrow">
-            MIDNIGHT BEY CLUB
-          </p>
-
-          <img
-            src="/image0.png"
-            alt="MIDNIGHT BEY CLUB"
-            className="about-logo"
-          />
-
-          <h2>
-            NO SLEEP.
-            <br />
-            KEEP SPIN.
-          </h2>
-
-          <p className="about-copy">
-            MIDNIGHT BEY CLUB
-            <br />
-            BEYBLADE X COMMUNITY
-            <br />
-            KANAGAWA / JAPAN
-          </p>
-
-          <div className="about-line" />
-
-          <div className="footer-meta">
-            <span>© 2026 MIDNIGHT BEY CLUB</span>
-            <span>ALL BATTLES MATTER.</span>
-          </div>
-        </div>
-      </section>
-
-      <style jsx global>{`
-        * {
-          box-sizing: border-box;
-        }
-
-        html {
-          scroll-behavior: smooth;
-        }
-
-        body {
-          margin: 0;
-          background: #050507;
-          color: #f4f1f8;
-          font-family:
-            Arial,
-            Helvetica,
-            sans-serif;
-        }
-
-        button {
-          font: inherit;
-        }
-
-        .site {
-          min-height: 100vh;
-          overflow: hidden;
-          background:
-            radial-gradient(
-              circle at 75% 15%,
-              rgba(91, 45, 170, 0.18),
-              transparent 28%
-            ),
-            #050507;
-        }
-
-        .header {
-          position: fixed;
-          z-index: 100;
-          top: 0;
-          left: 0;
-          right: 0;
-          background: rgba(5, 5, 7, 0.78);
-          backdrop-filter: blur(18px);
-          border-bottom: 1px solid
-            rgba(255, 255, 255, 0.08);
-        }
-
-        .header-inner {
-          max-width: 1400px;
-          height: 78px;
-          margin: 0 auto;
-          padding: 0 32px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-
-        .brand {
-          border: 0;
-          background: transparent;
-          padding: 0;
-          cursor: pointer;
-        }
-
-        .brand-logo {
-          width: 130px;
-          height: 52px;
-          object-fit: contain;
-          object-position: center;
-          filter: brightness(1.1);
-        }
-
-        .nav {
-          display: flex;
-          gap: 36px;
-          align-items: center;
-        }
-
-        .nav button {
-          border: 0;
-          background: transparent;
-          color: #aaa6b2;
-          cursor: pointer;
-          font-size: 11px;
-          font-weight: 700;
-          letter-spacing: 0.18em;
-          transition: 0.25s;
-        }
-
-        .nav button:hover {
-          color: white;
-        }
-
-        .menu-button {
-          display: none;
-          width: 40px;
-          height: 40px;
-          padding: 8px;
-          border: 0;
-          background: transparent;
-          cursor: pointer;
-        }
-
-        .menu-button span {
-          display: block;
-          height: 2px;
-          margin: 6px 0;
-          background: white;
-        }
-
-        .hero {
-          min-height: 100vh;
-          position: relative;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 130px 24px 70px;
-          text-align: center;
-          border-bottom: 1px solid
-            rgba(255, 255, 255, 0.08);
-        }
-
-        .hero-glow {
-          position: absolute;
-          width: 650px;
-          height: 650px;
-          border-radius: 50%;
-          background: radial-gradient(
-            circle,
-            rgba(99, 45, 190, 0.22),
-            transparent 68%
-          );
-          filter: blur(20px);
-        }
-
-        .hero-content {
-          position: relative;
-          z-index: 2;
-          max-width: 850px;
-        }
-
-        .eyebrow {
-          margin: 0 0 20px;
-          color: #8f899b;
-          font-size: 10px;
-          font-weight: 700;
-          letter-spacing: 0.3em;
-        }
-
-        .hero-logo {
-          width: min(500px, 82vw);
-          max-height: 220px;
-          object-fit: contain;
-          margin: 0 auto 26px;
-        }
-
-        .hero h1 {
-          margin: 0;
-          font-size: clamp(48px, 9vw, 108px);
-          line-height: 0.88;
-          letter-spacing: -0.055em;
-          font-weight: 900;
-        }
-
-        .hero-copy {
-          margin: 30px 0;
-          color: #8f899b;
-          font-size: 10px;
-          line-height: 1.9;
-          letter-spacing: 0.28em;
-        }
-
-        .primary-button {
-          display: inline-flex;
-          align-items: center;
-          gap: 24px;
-          padding: 16px 22px;
-          border: 1px solid
-            rgba(255, 255, 255, 0.22);
-          background: rgba(255, 255, 255, 0.05);
-          color: white;
-          cursor: pointer;
-          font-size: 10px;
-          font-weight: 800;
-          letter-spacing: 0.18em;
-          transition: 0.25s;
-        }
-
-        .primary-button:hover {
-          background: white;
-          color: black;
-        }
-
-        .primary-button span {
-          font-size: 18px;
-        }
-
-        .hero-bottom {
-          position: absolute;
-          left: 32px;
-          right: 32px;
-          bottom: 28px;
-          display: flex;
-          justify-content: space-between;
-          color: #5e5966;
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.2em;
-        }
-
-        .section {
-          max-width: 1400px;
-          margin: 0 auto;
-          padding: 130px 32px;
-        }
-
-        .section-heading {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-end;
-          margin-bottom: 55px;
-        }
-
-        .section-heading h2 {
-          margin: 0;
-          font-size: clamp(48px, 7vw, 90px);
-          line-height: 0.9;
-          letter-spacing: -0.055em;
-        }
-
-        .section-number {
-          color: #5e5966;
-          font-size: 12px;
-          letter-spacing: 0.2em;
-        }
-
-        .tournament-grid {
-          display: grid;
-          grid-template-columns:
-            repeat(3, 1fr);
-          gap: 14px;
-        }
-
-        .tournament-card {
-          position: relative;
-          min-height: 330px;
-          padding: 24px;
-          display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-          border: 1px solid
-            rgba(255, 255, 255, 0.1);
-          background:
-            linear-gradient(
-              145deg,
-              rgba(101, 49, 180, 0.14),
-              rgba(255, 255, 255, 0.025)
-            );
-          transition: 0.3s;
-        }
-
-        .tournament-card:hover {
-          transform: translateY(-5px);
-          border-color: rgba(
-            145,
-            93,
-            230,
-            0.5
-          );
-        }
-
-        .card-top {
-          display: flex;
-          justify-content: space-between;
-          color: #66616d;
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.16em;
-        }
-
-        .status {
-          color: #77717f;
-        }
-
-        .status.open {
-          color: #b68aff;
-        }
-
-        .date {
-          margin: 0 0 15px;
-          color: #8c8793;
-          font-size: 12px;
-          letter-spacing: 0.15em;
-        }
-
-        .card-main h3 {
-          margin: 0;
-          max-width: 280px;
-          font-size: 28px;
-          line-height: 1;
-          letter-spacing: -0.035em;
-        }
-
-        .location {
-          margin: 18px 0 0;
-          color: #77717f;
-          font-size: 10px;
-          font-weight: 700;
-          letter-spacing: 0.2em;
-        }
-
-        .card-arrow {
-          position: absolute;
-          right: 22px;
-          bottom: 18px;
-          color: #80798a;
-          font-size: 22px;
-        }
-
-        .ranking-section {
-          border-top: 1px solid
-            rgba(255, 255, 255, 0.08);
-        }
-
-        .ranking-table {
-          border-top: 1px solid
-            rgba(255, 255, 255, 0.12);
-        }
-
-        .ranking-head,
-        .ranking-row {
-          display: grid;
-          grid-template-columns:
-            100px 1fr 120px 120px 100px;
-          align-items: center;
-        }
-
-        .ranking-head {
-          min-height: 48px;
-          color: #5e5966;
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.18em;
-          border-bottom: 1px solid
-            rgba(255, 255, 255, 0.08);
-        }
-
-        .ranking-row {
-          min-height: 82px;
-          border-bottom: 1px solid
-            rgba(255, 255, 255, 0.08);
-          transition: 0.2s;
-        }
-
-        .ranking-row:hover {
-          background: rgba(
-            116,
-            64,
-            201,
-            0.08
-          );
-        }
-
-        .rank {
-          color: #77717f;
-          font-size: 12px;
-        }
-
-        .player-name {
-          font-size: 18px;
-          font-weight: 800;
-          letter-spacing: -0.02em;
-        }
-
-        .ranking-row strong {
-          font-size: 24px;
-          color: #c29cff;
-        }
-
-        .ranking-note {
-          display: flex;
-          justify-content: space-between;
-          margin-top: 20px;
-          color: #5e5966;
-          font-size: 9px;
-          letter-spacing: 0.15em;
-        }
-
-        .history-section {
-          border-top: 1px solid
-            rgba(255, 255, 255, 0.08);
-        }
-
-        .history-section h2 span {
-          color: #9c68ed;
-        }
-
-        .history-content {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 80px;
-          align-items: end;
-        }
-
-        .history-big {
-          display: flex;
-          align-items: baseline;
-          gap: 20px;
-        }
-
-        .history-big span {
-          color: #5e5966;
-          font-size: 20px;
-          letter-spacing: 0.2em;
-        }
-
-        .history-big strong {
-          font-size: clamp(
-            100px,
-            18vw,
-            250px
-          );
-          line-height: 0.7;
-          letter-spacing: -0.08em;
-        }
-
-        .history-text {
-          max-width: 500px;
-          color: #89838f;
-          font-size: 15px;
-          line-height: 1.9;
-        }
-
-        .history-text p {
-          margin: 0 0 24px;
-        }
-
-        .about-section {
-          position: relative;
-          padding: 140px 32px 40px;
-          border-top: 1px solid
-            rgba(255, 255, 255, 0.08);
-          background:
-            radial-gradient(
-              circle at 50% 20%,
-              rgba(93, 42, 173, 0.16),
-              transparent 35%
-            ),
-            #030305;
-        }
-
-        .about-inner {
-          max-width: 900px;
-          margin: 0 auto;
-          text-align: center;
-        }
-
-        .about-logo {
-          width: min(480px, 80vw);
-          max-height: 220px;
-          object-fit: contain;
-          margin: 10px auto 35px;
-        }
-
-        .about-section h2 {
-          margin: 0;
-          font-size: clamp(
-            48px,
-            8vw,
-            90px
-          );
-          line-height: 0.9;
-          letter-spacing: -0.06em;
-        }
-
-        .about-copy {
-          margin: 35px 0;
-          color: #77717f;
-          font-size: 10px;
-          line-height: 2;
-          letter-spacing: 0.25em;
-        }
-
-        .about-line {
-          height: 1px;
-          margin: 70px 0 25px;
-          background: rgba(
-            255,
-            255,
-            255,
-            0.1
-          );
-        }
-
-        .footer-meta {
-          display: flex;
-          justify-content: space-between;
-          color: #4e4a55;
-          font-size: 8px;
-          letter-spacing: 0.18em;
-        }
-
-        @media (max-width: 800px) {
-          .header-inner {
-            height: 68px;
-            padding: 0 20px;
-          }
-
-          .brand-logo {
-            width: 105px;
-          }
-
-          .menu-button {
-            display: block;
-          }
-
-          .nav {
-            position: absolute;
-            top: 68px;
-            left: 0;
-            right: 0;
-            display: none;
-            flex-direction: column;
-            align-items: stretch;
-            gap: 0;
-            padding: 12px 20px 20px;
-            background: rgba(
-              5,
-              5,
-              7,
-              0.97
-            );
-            border-bottom: 1px solid
-              rgba(255, 255, 255, 0.08);
-          }
-
-          .nav-open {
-            display: flex;
-          }
-
-          .nav button {
-            padding: 18px 5px;
-            text-align: left;
-            border-bottom: 1px solid
-              rgba(255, 255, 255, 0.06);
-          }
-
-          .hero {
-            padding-top: 110px;
-          }
-
-          .hero-logo {
-            width: 80vw;
-          }
-
-          .hero-bottom {
-            left: 20px;
-            right: 20px;
-          }
-
-          .section {
-            padding: 90px 20px;
-          }
-
-          .tournament-grid {
-            grid-template-columns: 1fr;
-          }
-
-          .tournament-card {
-            min-height: 260px;
-          }
-
-          .ranking-head,
-          .ranking-row {
-            grid-template-columns:
-              55px 1fr 55px 55px 55px;
-          }
-
-          .ranking-head {
-            font-size: 7px;
-          }
-
-          .ranking-row {
-            min-height: 68px;
-            font-size: 11px;
-          }
-
-          .player-name {
-            font-size: 14px;
-          }
-
-          .ranking-row strong {
-            font-size: 18px;
-          }
-
-          .history-content {
-            grid-template-columns: 1fr;
-            gap: 45px;
-          }
-
-          .history-big strong {
-            font-size: 150px;
-          }
-
-          .ranking-note {
-            gap: 15px;
-            flex-direction: column;
-          }
-
-          .about-section {
-            padding: 100px 20px 30px;
-          }
-
-          .footer-meta {
-            gap: 15px;
-            flex-direction: column;
-          }
-        }
-      `}</style>
-    </main>
+}
+
+function setTournamentInfo(name, dateText, rounds) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("大会");
+  if (!sheet) throw new Error("先に初期設定を実行してください。");
+
+  const status = String(sheet.getRange("B8").getValue() || "準備中");
+  if (status !== "準備中") {
+    throw new Error("大会開始後は大会設定を変更できません。");
+  }
+
+  name = String(name || "").trim();
+  dateText = String(dateText || "").trim();
+  rounds = Number(rounds) || 0;
+
+  if (!name) throw new Error("大会名を入力してください。");
+  if (rounds < 1 || rounds > 20) {
+    throw new Error("ラウンド数は1〜20で設定してください。");
+  }
+
+  sheet.getRange("B2").setValue(name);
+  sheet.getRange("B3").setValue(dateText);
+  sheet.getRange("B5").setValue(rounds);
+
+  return getTournamentInfo();
+}
+
+/* =========================
+   選手
+========================= */
+
+function getPlayers() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("選手");
+  const data = sheet.getRange(2, 1, 30, 7).getValues();
+  return data
+    .filter(function(row) { return String(row[1]).trim() !== ""; })
+    .map(function(row) { return String(row[1]).trim(); });
+}
+
+function getRegisteredPlayers() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("選手");
+  const data = sheet.getRange(2, 2, 30, 1).getValues();
+
+  return data
+    .map(function(row, index) {
+      return { no: index + 1, name: String(row[0] || "").trim() };
+    })
+    .filter(function(player) { return player.name !== ""; });
+}
+
+function registerPlayer(name) {
+  const tournament = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("大会");
+  const status = String(tournament.getRange("B8").getValue() || "準備中");
+
+  if (status !== "準備中") {
+    throw new Error("大会開始後は選手を変更できません。");
+  }
+
+  name = String(name || "").trim();
+  if (!name) throw new Error("選手名を入力してください。");
+  if (name.length > 20) throw new Error("選手名は20文字以内です。");
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("選手");
+  const data = sheet.getRange(2, 2, 30, 1).getValues();
+  const players = data
+    .map(function(row) { return String(row[0] || "").trim(); })
+    .filter(function(value) { return value !== ""; });
+
+  if (players.length >= 30) throw new Error("参加人数は最大30人です。");
+  if (players.includes(name)) throw new Error("同じ名前の選手がすでに登録されています。");
+
+  sheet.getRange(players.length + 2, 2).setValue(name);
+  return getRegisteredPlayers();
+}
+
+function removePlayer(no) {
+  const tournament = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("大会");
+  const status = String(tournament.getRange("B8").getValue() || "準備中");
+
+  if (status !== "準備中") {
+    throw new Error("大会開始後は選手を変更できません。");
+  }
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("選手");
+  const row = Number(no) + 1;
+  if (row < 2 || row > 31) throw new Error("選手番号が正しくありません。");
+
+  sheet.getRange(row, 2).clearContent();
+
+  const players = sheet.getRange(2, 2, 30, 1).getValues()
+    .map(function(row) { return String(row[0] || "").trim(); })
+    .filter(function(name) { return name !== ""; });
+
+  sheet.getRange(2, 2, 30, 1).clearContent();
+  if (players.length) {
+    sheet.getRange(2, 2, players.length, 1)
+      .setValues(players.map(function(name) { return [name]; }));
+  }
+
+  return getRegisteredPlayers();
+}
+
+/* =========================
+   大会開始・リセット
+========================= */
+
+function startTournament() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tournament = ss.getSheetByName("大会");
+  const matches = ss.getSheetByName("対戦");
+  const playersSheet = ss.getSheetByName("選手");
+
+  const status = String(tournament.getRange("B8").getValue() || "準備中");
+  if (status !== "準備中") {
+    throw new Error("この大会はすでに開始されています。");
+  }
+
+  const players = getPlayers();
+  if (players.length < 2) throw new Error("選手を2人以上登録してください。");
+  if (players.length > 30) throw new Error("参加人数は最大30人です。");
+
+  const configuredRounds = Number(tournament.getRange("B5").getValue()) || 0;
+  if (configuredRounds < 1) throw new Error("先にラウンド数を設定してください。");
+
+  matches.clear();
+  matches.getRange(1, 1, 1, 11).setValues([[
+    "Round", "試合No.", "選手A", "選手B", "A得点", "B得点",
+    "勝者", "状態", "Aフィニッシュ", "Bフィニッシュ", "備考"
+  ]]);
+
+  for (let i = 2; i <= 31; i++) {
+    playersSheet.getRange(i, 3, 1, 5).setValues([[0, 0, 0, 0, 0]]);
+  }
+
+  tournament.getRange("B4").setValue(players.length);
+  tournament.getRange("B8").setValue("開催中");
+  tournament.getRange("B9").setValue(1);
+
+  createRound(1);
+  updateRanking();
+
+  return "ROUND 1を開始しました！";
+}
+
+function resetTournament() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tournament = ss.getSheetByName("大会");
+  const players = ss.getSheetByName("選手");
+  const matches = ss.getSheetByName("対戦");
+  const ranking = ss.getSheetByName("順位");
+
+  const status = String(tournament.getRange("B8").getValue() || "準備中");
+  if (status === "開催中") {
+    throw new Error("開催中の大会はリセットできません。先に大会を終了してください。");
+  }
+
+  matches.clear();
+  matches.getRange(1, 1, 1, 11).setValues([[
+    "Round", "試合No.", "選手A", "選手B", "A得点", "B得点",
+    "勝者", "状態", "Aフィニッシュ", "Bフィニッシュ", "備考"
+  ]]);
+
+  players.getRange(2, 3, 30, 5).setValues(
+    Array.from({length: 30}, function() { return [0, 0, 0, 0, 0]; })
   );
+
+  ranking.clear();
+  ranking.getRange(1, 1, 1, 8).setValues([[
+    "順位", "選手名", "勝", "敗", "得点", "失点", "得失点差", "勝率"
+  ]]);
+
+  tournament.getRange("B4").setValue(getPlayers().length);
+  tournament.getRange("B8").setValue("準備中");
+  tournament.getRange("B9").setValue(0);
+
+  return getTournamentInfo();
+}
+
+/* =========================
+   ラウンド生成
+========================= */
+
+function createRound(roundNumber) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const playersSheet = ss.getSheetByName("選手");
+  const matchesSheet = ss.getSheetByName("対戦");
+
+  const data = playersSheet.getRange(2, 1, 30, 7).getValues();
+  const players = data
+    .filter(function(row) { return String(row[1]).trim() !== ""; })
+    .map(function(row) {
+      return {
+        name: String(row[1]).trim(),
+        wins: Number(row[2]) || 0,
+        losses: Number(row[3]) || 0,
+        diff: Number(row[6]) || 0
+      };
+    });
+
+  if (players.length < 2) throw new Error("選手が2人以上必要です。");
+
+  const history = {};
+  players.forEach(function(player) { history[player.name] = []; });
+
+  const lastRow = matchesSheet.getLastRow();
+  if (lastRow >= 2) {
+    const oldMatches = matchesSheet.getRange(2, 1, lastRow - 1, 11).getValues();
+    oldMatches.forEach(function(row) {
+      const a = row[2], b = row[3];
+      if (!a || !b || b === "BYE") return;
+      if (history[a]) history[a].push(b);
+      if (history[b]) history[b].push(a);
+    });
+  }
+
+  players.sort(function(a, b) {
+    if (b.wins !== a.wins) return b.wins - a.wins;
+    return b.diff - a.diff;
+  });
+
+  let byePlayer = null;
+  if (players.length % 2 === 1) {
+    const candidates = players.slice().sort(function(a, b) {
+      if (a.wins !== b.wins) return a.wins - b.wins;
+      return a.diff - b.diff;
+    });
+    byePlayer = candidates[0];
+  }
+
+  const remaining = players.filter(function(player) {
+    return !byePlayer || player.name !== byePlayer.name;
+  });
+
+  const used = {};
+  const pairs = [];
+
+  for (let i = 0; i < remaining.length; i++) {
+    const playerA = remaining[i];
+    if (used[playerA.name]) continue;
+
+    let opponent = null;
+
+    for (let j = i + 1; j < remaining.length; j++) {
+      const playerB = remaining[j];
+      if (used[playerB.name]) continue;
+      if (!history[playerA.name].includes(playerB.name)) {
+        opponent = playerB;
+        break;
+      }
+    }
+
+    if (!opponent) {
+      for (let j = i + 1; j < remaining.length; j++) {
+        const playerB = remaining[j];
+        if (!used[playerB.name]) {
+          opponent = playerB;
+          break;
+        }
+      }
+    }
+
+    if (opponent) {
+      pairs.push([
+        roundNumber, pairs.length + 1, playerA.name, opponent.name,
+        0, 0, "", "未実施", "", "", ""
+      ]);
+      used[playerA.name] = true;
+      used[opponent.name] = true;
+    }
+  }
+
+  if (byePlayer) {
+    pairs.push([
+      roundNumber, pairs.length + 1, byePlayer.name, "BYE",
+      4, 0, byePlayer.name, "確定", "", "", "不戦勝"
+    ]);
+  }
+
+  if (pairs.length) {
+    matchesSheet.getRange(
+      matchesSheet.getLastRow() + 1, 1, pairs.length, 11
+    ).setValues(pairs);
+  }
+
+  return pairs.length;
+}
+
+/* =========================
+   対戦
+========================= */
+
+function getCurrentMatches() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tournament = ss.getSheetByName("大会");
+  const sheet = ss.getSheetByName("対戦");
+
+  const round = Number(tournament.getRange("B9").getValue()) || 0;
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) return { round: round, matches: [] };
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 11).getValues();
+  const matches = [];
+
+  data.forEach(function(row, index) {
+    if (Number(row[0]) !== round) return;
+
+    matches.push({
+      row: index + 2,
+      number: row[1],
+      a: row[2],
+      b: row[3],
+      scoreA: Number(row[4]) || 0,
+      scoreB: Number(row[5]) || 0,
+      winner: row[6] || "",
+      status: row[7] || "未実施",
+      finishA: row[8] || "",
+      finishB: row[9] || ""
+    });
+  });
+
+  return { round: round, matches: matches };
+}
+
+function addBattlePoint(row, player, points, finishName) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tournament = ss.getSheetByName("大会");
+  const sheet = ss.getSheetByName("対戦");
+
+  if (String(tournament.getRange("B8").getValue()) !== "開催中") {
+    throw new Error("現在、大会は開催中ではありません。");
+  }
+
+  const status = String(sheet.getRange(row, 8).getValue() || "");
+  if (status === "確定") throw new Error("この試合はすでに確定しています。");
+
+  const scoreColumn = player === "A" ? 5 : 6;
+  const finishColumn = player === "A" ? 9 : 10;
+
+  const current = Number(sheet.getRange(row, scoreColumn).getValue()) || 0;
+  const maxRecord = Number(tournament.getRange("B7").getValue()) || 6;
+  const newScore = Math.min(current + Number(points), maxRecord);
+
+  sheet.getRange(row, scoreColumn).setValue(newScore);
+  sheet.getRange(row, finishColumn).setValue(String(finishName || ""));
+
+  const scoreA = Number(sheet.getRange(row, 5).getValue()) || 0;
+  const scoreB = Number(sheet.getRange(row, 6).getValue()) || 0;
+  const winCondition = Number(tournament.getRange("B6").getValue()) || 4;
+
+  let winner = "";
+  if (scoreA >= winCondition && scoreB < winCondition) {
+    winner = sheet.getRange(row, 3).getValue();
+  } else if (scoreB >= winCondition && scoreA < winCondition) {
+    winner = sheet.getRange(row, 4).getValue();
+  }
+
+  if (winner) {
+    sheet.getRange(row, 7).setValue(winner);
+    sheet.getRange(row, 8).setValue("確定");
+    recalculateAllResults();
+  }
+
+  return {
+    scoreA: scoreA,
+    scoreB: scoreB,
+    winner: winner
+  };
+}
+
+/* =========================
+   集計
+========================= */
+
+function recalculateAllResults() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const playersSheet = ss.getSheetByName("選手");
+  const matchesSheet = ss.getSheetByName("対戦");
+
+  const playerData = playersSheet.getRange(2, 1, 30, 7).getValues();
+  const stats = {};
+
+  playerData.forEach(function(row) {
+    const name = String(row[1] || "").trim();
+    if (!name) return;
+    stats[name] = { wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
+  });
+
+  const lastRow = matchesSheet.getLastRow();
+  if (lastRow >= 2) {
+    const matches = matchesSheet.getRange(2, 1, lastRow - 1, 11).getValues();
+
+    matches.forEach(function(row) {
+      const a = row[2], b = row[3];
+      const scoreA = Number(row[4]) || 0;
+      const scoreB = Number(row[5]) || 0;
+      const status = row[7];
+
+      if (!a || !b || status !== "確定") return;
+
+      if (b === "BYE") {
+        if (stats[a]) stats[a].wins++;
+        return;
+      }
+
+      if (!stats[a] || !stats[b]) return;
+
+      stats[a].pointsFor += scoreA;
+      stats[a].pointsAgainst += scoreB;
+      stats[b].pointsFor += scoreB;
+      stats[b].pointsAgainst += scoreA;
+
+      if (scoreA >= 4 && scoreB < 4) {
+        stats[a].wins++;
+        stats[b].losses++;
+      } else if (scoreB >= 4 && scoreA < 4) {
+        stats[b].wins++;
+        stats[a].losses++;
+      }
+    });
+  }
+
+  for (let i = 0; i < playerData.length; i++) {
+    const name = String(playerData[i][1] || "").trim();
+    if (!name || !stats[name]) continue;
+
+    const s = stats[name];
+    playersSheet.getRange(i + 2, 3, 1, 5).setValues([[
+      s.wins, s.losses, s.pointsFor, s.pointsAgainst,
+      s.pointsFor - s.pointsAgainst
+    ]]);
+  }
+
+  updateRanking();
+}
+
+function updateRanking() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const playersSheet = ss.getSheetByName("選手");
+  const rankingSheet = ss.getSheetByName("順位");
+
+  const data = playersSheet.getRange(2, 1, 30, 7).getValues()
+    .filter(function(row) { return String(row[1]).trim() !== ""; });
+
+  data.sort(function(a, b) {
+    const winsA = Number(a[2]) || 0, winsB = Number(b[2]) || 0;
+    const diffA = Number(a[6]) || 0, diffB = Number(b[6]) || 0;
+    const pointsA = Number(a[4]) || 0, pointsB = Number(b[4]) || 0;
+
+    if (winsB !== winsA) return winsB - winsA;
+    if (diffB !== diffA) return diffB - diffA;
+    return pointsB - pointsA;
+  });
+
+  rankingSheet.clear();
+  rankingSheet.getRange(1, 1, 1, 8).setValues([[
+    "順位", "選手名", "勝", "敗", "得点", "失点", "得失点差", "勝率"
+  ]]);
+
+  const output = data.map(function(row, index) {
+    const wins = Number(row[2]) || 0;
+    const losses = Number(row[3]) || 0;
+    const total = wins + losses;
+
+    return [
+      index + 1, row[1], wins, losses,
+      Number(row[4]) || 0, Number(row[5]) || 0,
+      Number(row[6]) || 0, total ? wins / total : 0
+    ];
+  });
+
+  if (output.length) {
+    rankingSheet.getRange(2, 1, output.length, 8).setValues(output);
+    rankingSheet.getRange(2, 8, output.length, 1).setNumberFormat("0.0%");
+  }
+
+  rankingSheet.autoResizeColumns(1, 8);
+}
+
+function getRankingData() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("順位");
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  return sheet.getRange(2, 1, lastRow - 1, 8).getValues()
+    .filter(function(row) { return row[1] !== ""; })
+    .map(function(row) {
+      return {
+        rank: row[0],
+        name: row[1],
+        wins: row[2],
+        losses: row[3],
+        points: row[4],
+        against: row[5],
+        diff: row[6],
+        winRate: row[7]
+      };
+    });
+}
+
+/* =========================
+   次ラウンド
+========================= */
+
+function nextRound() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tournament = ss.getSheetByName("大会");
+  const matches = ss.getSheetByName("対戦");
+
+  if (String(tournament.getRange("B8").getValue()) !== "開催中") {
+    throw new Error("現在、大会は開催中ではありません。");
+  }
+
+  const currentRound = Number(tournament.getRange("B9").getValue()) || 0;
+  const totalRounds = Number(tournament.getRange("B5").getValue()) || 0;
+
+  if (currentRound >= totalRounds) {
+    throw new Error("設定した最終ラウンドです。大会を終了してください。");
+  }
+
+  const lastRow = matches.getLastRow();
+  if (lastRow < 2) throw new Error("対戦カードがありません。");
+
+  const allMatches = matches.getRange(2, 1, lastRow - 1, 11).getValues();
+  const currentMatches = allMatches.filter(function(row) {
+    return Number(row[0]) === currentRound;
+  });
+
+  if (currentMatches.some(function(row) { return row[7] !== "確定"; })) {
+    throw new Error("まだ結果が確定していない試合があります。");
+  }
+
+  recalculateAllResults();
+
+  const newRound = currentRound + 1;
+  tournament.getRange("B9").setValue(newRound);
+  createRound(newRound);
+
+  return "ROUND " + newRound + "を開始しました！";
+}
+
+/* =========================
+   大会終了
+========================= */
+
+function finishTournament() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tournament = ss.getSheetByName("大会");
+  const matches = ss.getSheetByName("対戦");
+
+  const status = String(tournament.getRange("B8").getValue() || "");
+  if (status !== "開催中") throw new Error("開催中の大会ではありません。");
+
+  const lastRow = matches.getLastRow();
+  if (lastRow >= 2) {
+    const data = matches.getRange(2, 1, lastRow - 1, 11).getValues();
+    if (data.some(function(row) { return row[7] !== "確定"; })) {
+      throw new Error("まだ結果が確定していない試合があります。");
+    }
+  }
+
+  recalculateAllResults();
+  tournament.getRange("B8").setValue("終了");
+
+  const ranking = getRankingData();
+  if (!ranking.length) throw new Error("順位データがありません。");
+
+  return { champion: ranking[0], ranking: ranking };
 }

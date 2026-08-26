@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 type Tournament = {
-  id: number;
+  id: string;
   name: string;
   date: string;
   location: string;
@@ -20,21 +20,21 @@ type Player = {
 
 const initialTournaments: Tournament[] = [
   {
-    id: 1,
+    id: "00000000-0000-4000-8000-000000000001",
     name: "MIDNIGHT BEY CLUB #01",
     date: "2026.09.12",
     location: "KANAGAWA",
     status: "ENTRY OPEN",
   },
   {
-    id: 2,
+    id: "00000000-0000-4000-8000-000000000002",
     name: "MIDNIGHT BEY CLUB #02",
     date: "2026.10.10",
     location: "YOKOHAMA",
     status: "UPCOMING",
   },
   {
-    id: 3,
+    id: "00000000-0000-4000-8000-000000000003",
     name: "MIDNIGHT BEY CLUB #00",
     date: "2026.08.09",
     location: "YAMATO",
@@ -94,7 +94,7 @@ export default function AdminPage() {
   const [message, setMessage] = useState("");
 
   const updateTournament = (
-    id: number,
+    id: string,
     field: keyof Tournament,
     value: string
   ) => {
@@ -169,14 +169,20 @@ export default function AdminPage() {
        */
 
       for (const tournament of tournaments) {
+        // Supabase column is `tournament_date`, and `id` is UUID.
+        // Upsert also works when the table is currently empty.
         const response = await fetch(
-          `${baseUrl}/rest/v1/tournaments?id=eq.${tournament.id}`,
+          `${baseUrl}/rest/v1/tournaments?on_conflict=id`,
           {
-            method: "PATCH",
-            headers,
+            method: "POST",
+            headers: {
+              ...headers,
+              Prefer: "resolution=merge-duplicates,return=minimal",
+            },
             body: JSON.stringify({
+              id: tournament.id,
               name: tournament.name,
-              date: tournament.date,
+              tournament_date: tournament.date.replace(/\\./g, "-"),
               location: tournament.location,
               status: tournament.status,
             }),

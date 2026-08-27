@@ -3,8 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
-type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED" | "NO DATA";
-type TournamentFormat = "3ON3" | "TEAM" | "NO DATA";
+type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
 
 type Tournament = {
   id: string;
@@ -12,7 +11,6 @@ type Tournament = {
   date: string;
   location: string;
   status: TournamentStatus;
-  format: TournamentFormat;
 };
 
 type Player = {
@@ -46,7 +44,6 @@ const fallbackTournaments: Tournament[] = [
     date: "2026.09.12",
     location: "KANAGAWA",
     status: "ENTRY OPEN",
-    format: "3ON3",
   },
   {
     id: "fallback-2",
@@ -54,7 +51,6 @@ const fallbackTournaments: Tournament[] = [
     date: "2026.10.10",
     location: "YOKOHAMA",
     status: "UPCOMING",
-    format: "3ON3",
   },
   {
     id: "fallback-3",
@@ -62,7 +58,6 @@ const fallbackTournaments: Tournament[] = [
     date: "",
     location: "",
     status: "UPCOMING",
-    format: "NO DATA",
   },
 ];
 
@@ -215,44 +210,6 @@ function renderData(value: unknown): ReactNode {
   );
 }
 
-function getTournamentFormat(row: ResultRow): TournamentFormat {
-  const raw = String(
-    row.format ?? row.tournament_format ?? row.type ?? row.tournament_type ?? row.event_type ?? ""
-  ).toUpperCase();
-  if (raw.includes("TEAM")) return "TEAM";
-  if (raw.includes("3ON3") || raw.includes("3 ON 3") || raw.includes("THREE")) return "3ON3";
-  const name = String(row.name ?? "").toUpperCase();
-  if (name.includes("3ON3") || name.includes("3 ON 3")) return "3ON3";
-  return "3ON3";
-}
-
-function getThreeBeys(row: ResultRow): unknown[] {
-  const direct = [
-    ["bey1", "bey_1", "custom1", "custom_1", "blade1", "combo1"],
-    ["bey2", "bey_2", "custom2", "custom_2", "blade2", "combo2"],
-    ["bey3", "bey_3", "custom3", "custom_3", "blade3", "combo3"],
-  ].map((keys) => valueFrom(row, keys));
-  if (direct.some((v) => v !== undefined)) return direct;
-
-  const packed = valueFrom(row, ["custom", "custom_data", "customization", "combo", "deck", "registration_data", "beyblade"]);
-  if (Array.isArray(packed)) return packed.slice(0, 3);
-  if (packed && typeof packed === "object") {
-    const obj = packed as Record<string, unknown>;
-    const values = [
-      obj.bey1 ?? obj.bey_1 ?? obj.custom1 ?? obj.custom_1,
-      obj.bey2 ?? obj.bey_2 ?? obj.custom2 ?? obj.custom_2,
-      obj.bey3 ?? obj.bey_3 ?? obj.custom3 ?? obj.custom_3,
-    ];
-    if (values.some((v) => v !== undefined)) return values;
-  }
-  return [];
-}
-
-function customRowsForPlayer(rows: ResultRow[], playerId?: string) {
-  if (!playerId) return [];
-  return rows.filter((row) => String(row.player_id ?? row.playerId ?? "") === playerId);
-}
-
 function mergePlayers(
   rankingRows: ResultRow[],
   playerRows: ResultRow[]
@@ -350,7 +307,6 @@ export default function Home() {
                 date: displayDate(row.tournament_date ?? row.date),
                 location: String(row.location ?? ""),
                 status: String(row.status ?? "UPCOMING") as TournamentStatus,
-                format: getTournamentFormat(row),
               }))
             );
           }
@@ -408,7 +364,7 @@ export default function Home() {
     setTeamRows([]);
     setTeamMemberRows([]);
 
-    if (!tournament.id || tournament.id.startsWith("nodata-") || tournament.format === "NO DATA") return;
+    if (!tournament.id || tournament.id.startsWith("nodata-")) return;
 
     setDetailLoading(true);
 
@@ -421,7 +377,9 @@ export default function Home() {
             )}`
           ),
           supabaseFetch(
-            `/rest/v1/custom_registrations?select=*`
+            `/rest/v1/custom_registrations?select=*&tournament_id=eq.${encodeURIComponent(
+              tournament.id
+            )}`
           ),
           supabaseFetch(
             `/rest/v1/teams?select=*&tournament_id=eq.${encodeURIComponent(
@@ -495,8 +453,7 @@ export default function Home() {
         name: "NO DATA",
         date: "",
         location: "",
-        status: "NO DATA",
-        format: "NO DATA",
+        status: "UPCOMING",
       });
     }
 
@@ -507,9 +464,7 @@ export default function Home() {
     (t) => t.status === "FINISHED"
   ).length;
 
-  // Supabase Auth itself uses email internally, but the public UI uses ID only.
-  // The synthetic address is never shown to members.
-  const accountEmail = (id: string) =>
+  // The user only sees an ID. Supabase Auth receives an internal synthetic email address.\n  const accountEmail = (id: string) =>
     `${id.trim().toLowerCase()}@id.midnightbey.club`;
 
   const signUp = async () => {
@@ -527,21 +482,18 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/auth/v1/signup`,
-        {
-          method: "POST",
-          headers: apiHeaders(),
-          body: JSON.stringify({
-            email: accountEmail(loginId),
-            password,
-            data: {
-              login_id: loginId.trim(),
-              display_name: displayName.trim(),
-            },
-          }),
-        }
-      );
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify({
+          email: accountEmail(loginId),
+          password,
+          data: {
+            login_id: loginId.trim(),
+            display_name: displayName.trim(),
+          },
+        }),
+      });
 
       const data = await response.json();
 
@@ -556,14 +508,18 @@ export default function Home() {
           "midnight_session",
           JSON.stringify(nextSession)
         );
-        await syncAccount(nextSession.access_token, data.user?.id, loginId.trim(), displayName.trim());
+        await syncAccount(
+          nextSession.access_token,
+          data.user?.id,
+          loginId.trim(),
+          displayName.trim()
+        );
+        setAccountMessage("ACCOUNT CREATED.");
+      } else {
+        setAccountMessage(
+          "ACCOUNT CREATED. IF EMAIL CONFIRMATION IS ENABLED, THE ACCOUNT MUST BE CONFIRMED BY THE SITE OWNER."
+        );
       }
-
-      setAccountMessage(
-        data?.access_token
-          ? "ACCOUNT CREATED."
-          : "ACCOUNT CREATED. EMAIL CONFIRMATION MUST BE DISABLED FOR ID LOGIN."
-      );
     } catch (error) {
       setAccountMessage(
         error instanceof Error ? error.message : "SIGN UP FAILED."
@@ -610,7 +566,12 @@ export default function Home() {
         JSON.stringify(nextSession)
       );
 
-      await syncAccount(nextSession.access_token, data.user?.id, loginId.trim(), displayName.trim());
+      await syncAccount(
+        nextSession.access_token,
+        data.user?.id,
+        loginId.trim(),
+        displayName.trim()
+      );
       setAccountMessage("LOGGED IN.");
     } catch (error) {
       setAccountMessage(
@@ -702,26 +663,24 @@ export default function Home() {
       return;
     }
 
-    try {
-      const response = await supabaseFetch(
-        `/rest/v1/accounts?select=is_admin&limit=1&id=eq.${encodeURIComponent(session.user.id)}`,
-        {},
-        session.access_token
-      );
+    const response = await supabaseFetch(
+      `/rest/v1/accounts?select=is_admin&limit=1&id=eq.${encodeURIComponent(
+        session.user.id
+      )}`,
+      {},
+      session.access_token
+    );
 
-      if (!response.ok) {
-        setAccountMessage("ADMIN CHECK FAILED.");
-        return;
-      }
-
-      const rows = await response.json();
-      if (rows?.[0]?.is_admin === true) {
-        window.location.href = "/admin";
-      } else {
-        setAccountMessage("ADMIN ACCESS REQUIRED.");
-      }
-    } catch {
+    if (!response.ok) {
       setAccountMessage("ADMIN CHECK FAILED.");
+      return;
+    }
+
+    const rows = await response.json();
+    if (rows?.[0]?.is_admin === true) {
+      window.location.href = "/admin";
+    } else {
+      setAccountMessage("ADMIN ACCESS REQUIRED.");
     }
   };
 
@@ -880,9 +839,6 @@ export default function Home() {
                   <p className="location">
                     {tournament.location || "ARCHIVE SLOT"}
                   </p>
-                  {!noData && (
-                    <p className="format-label">{tournament.format}</p>
-                  )}
                 </div>
 
                 <div className="card-arrow">
@@ -1032,7 +988,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / {selectedTournament.format}
+              TOURNAMENT / #{String(selectedTournament.id).padStart(2, "0")}
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -1073,15 +1029,9 @@ export default function Home() {
                           : undefined;
                         const custom =
                           getCustomData(row) ??
-                          (customRow ? getCustomData(customRow) : null);
-                        const threeBeys =
-                          selectedTournament.format === "3ON3"
-                            ? getThreeBeys(row).length
-                              ? getThreeBeys(row)
-                              : customRow
-                                ? getThreeBeys(customRow)
-                                : []
-                            : [];
+                          (customRow
+                            ? getCustomData(customRow)
+                            : null);
 
                         return (
                           <div className="result-card" key={String(row.id ?? index)}>
@@ -1100,28 +1050,14 @@ export default function Home() {
                                 </span>
                               )}
 
-                              {selectedTournament.format === "3ON3" && threeBeys.length > 0 ? (
+                              {custom && (
                                 <div className="custom-box">
-                                  <div className="custom-label">3 BEYS</div>
-                                  <div className="three-bey-grid">
-                                    {threeBeys.map((bey, beyIndex) => (
-                                      <div className="three-bey-card" key={beyIndex}>
-                                        <span>BEY {beyIndex + 1}</span>
-                                        {renderData(
-                                          typeof bey === "string"
-                                            ? (() => { try { return JSON.parse(bey); } catch { return bey; } })()
-                                            : bey
-                                        )}
-                                      </div>
-                                    ))}
+                                  <div className="custom-label">
+                                    CUSTOM
                                   </div>
-                                </div>
-                              ) : custom ? (
-                                <div className="custom-box">
-                                  <div className="custom-label">CUSTOM</div>
                                   {renderData(custom)}
                                 </div>
-                              ) : null}
+                              )}
                             </div>
                           </div>
                         );
@@ -1130,7 +1066,7 @@ export default function Home() {
                   )}
                 </div>
 
-                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
+                {teamRows.length > 0 && (
                   <div className="detail-block">
                     <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
@@ -1233,7 +1169,7 @@ export default function Home() {
               <>
                 <h2>ACCOUNT</h2>
                 <p className="account-email">
-                  {loginId || session.user?.email || "SIGNED IN"}
+                  {loginId || "SIGNED IN"}
                 </p>
 
                 <div className="account-block">
@@ -1304,7 +1240,7 @@ export default function Home() {
                     type="text"
                     value={loginId}
                     onChange={(event) =>
-                      setLoginId(event.target.value.replace(/\s/g, ""))
+                      setLoginId(event.target.value.replace(/\\s/g, ""))
                     }
                     placeholder="YOUR ID"
                     autoComplete="username"
@@ -1735,35 +1671,6 @@ export default function Home() {
           bottom: 18px;
           color: #80798a;
           font-size: 22px;
-        }
-
-        .format-label {
-          margin: 8px 0 0;
-          color: #9c68ed;
-          font-size: 8px;
-          font-weight: 800;
-          letter-spacing: 0.2em;
-        }
-
-        .three-bey-grid {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 8px;
-        }
-
-        .three-bey-card {
-          padding: 12px;
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          background: rgba(255, 255, 255, 0.025);
-        }
-
-        .three-bey-card > span {
-          display: block;
-          margin-bottom: 8px;
-          color: #9c68ed;
-          font-size: 8px;
-          font-weight: 800;
-          letter-spacing: 0.15em;
         }
 
         .ranking-section {
@@ -2277,10 +2184,6 @@ export default function Home() {
 
           .tournament-card {
             min-height: 260px;
-          }
-
-          .three-bey-grid {
-            grid-template-columns: 1fr;
           }
 
           .ranking-head,

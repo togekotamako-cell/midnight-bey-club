@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
-type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
+type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED" | "NO DATA";
+type TournamentFormat = "3ON3" | "TEAM" | "NO DATA";
 
 type Tournament = {
   id: string;
@@ -11,6 +12,7 @@ type Tournament = {
   date: string;
   location: string;
   status: TournamentStatus;
+  format: TournamentFormat;
 };
 
 type Player = {
@@ -44,6 +46,7 @@ const fallbackTournaments: Tournament[] = [
     date: "2026.09.12",
     location: "KANAGAWA",
     status: "ENTRY OPEN",
+    format: "3ON3",
   },
   {
     id: "fallback-2",
@@ -51,6 +54,7 @@ const fallbackTournaments: Tournament[] = [
     date: "2026.10.10",
     location: "YOKOHAMA",
     status: "UPCOMING",
+    format: "3ON3",
   },
   {
     id: "fallback-3",
@@ -58,6 +62,7 @@ const fallbackTournaments: Tournament[] = [
     date: "",
     location: "",
     status: "UPCOMING",
+    format: "NO DATA",
   },
 ];
 
@@ -210,6 +215,44 @@ function renderData(value: unknown): ReactNode {
   );
 }
 
+function getTournamentFormat(row: ResultRow): TournamentFormat {
+  const raw = String(
+    row.format ?? row.tournament_format ?? row.type ?? row.tournament_type ?? row.event_type ?? ""
+  ).toUpperCase();
+  if (raw.includes("TEAM")) return "TEAM";
+  if (raw.includes("3ON3") || raw.includes("3 ON 3") || raw.includes("THREE")) return "3ON3";
+  const name = String(row.name ?? "").toUpperCase();
+  if (name.includes("3ON3") || name.includes("3 ON 3")) return "3ON3";
+  return "3ON3";
+}
+
+function getThreeBeys(row: ResultRow): unknown[] {
+  const direct = [
+    ["bey1", "bey_1", "custom1", "custom_1", "blade1", "combo1"],
+    ["bey2", "bey_2", "custom2", "custom_2", "blade2", "combo2"],
+    ["bey3", "bey_3", "custom3", "custom_3", "blade3", "combo3"],
+  ].map((keys) => valueFrom(row, keys));
+  if (direct.some((v) => v !== undefined)) return direct;
+
+  const packed = valueFrom(row, ["custom", "custom_data", "customization", "combo", "deck", "registration_data", "beyblade"]);
+  if (Array.isArray(packed)) return packed.slice(0, 3);
+  if (packed && typeof packed === "object") {
+    const obj = packed as Record<string, unknown>;
+    const values = [
+      obj.bey1 ?? obj.bey_1 ?? obj.custom1 ?? obj.custom_1,
+      obj.bey2 ?? obj.bey_2 ?? obj.custom2 ?? obj.custom_2,
+      obj.bey3 ?? obj.bey_3 ?? obj.custom3 ?? obj.custom_3,
+    ];
+    if (values.some((v) => v !== undefined)) return values;
+  }
+  return [];
+}
+
+function customRowsForPlayer(rows: ResultRow[], playerId?: string) {
+  if (!playerId) return [];
+  return rows.filter((row) => String(row.player_id ?? row.playerId ?? "") === playerId);
+}
+
 function mergePlayers(
   rankingRows: ResultRow[],
   playerRows: ResultRow[]
@@ -268,6 +311,7 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
+  const [accountIsAdmin, setAccountIsAdmin] = useState(false);
   const [accountMessage, setAccountMessage] = useState("");
   const [accountLoading, setAccountLoading] = useState(false);
 
@@ -288,13 +332,45 @@ export default function Home() {
     }
   }, []);
 
+  const loadAccountProfile = async (accessToken: string, userId: string) => {
+    try {
+      const response = await supabaseFetch(
+        `/rest/v1/accounts?select=player_id,is_admin,display_name&id=eq.${encodeURIComponent(userId)}&limit=1`,
+        {},
+        accessToken
+      );
+
+      if (!response.ok) return;
+
+      const rows = await response.json();
+      const account = Array.isArray(rows) ? rows[0] : null;
+      if (!account) return;
+
+      setAccountIsAdmin(account.is_admin === true);
+      if (account.display_name && !displayName) {
+        setDisplayName(String(account.display_name));
+      }
+      if (account.player_id) {
+        setSelectedPlayerId(String(account.player_id));
+      }
+    } catch (error) {
+      console.warn("Account profile could not be loaded.", error);
+    }
+  };
+
+  useEffect(() => {
+    if (session?.access_token && session.user?.id) {
+      loadAccountProfile(session.access_token, session.user.id);
+    }
+  }, [session]);
+
   useEffect(() => {
     const loadData = async () => {
       setRankingLoading(true);
 
       try {
         const tournamentResponse = await supabaseFetch(
-          "/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=tournament_date.asc"
+          "/rest/v1/tournaments?select=*&order=tournament_date.asc"
         );
 
         if (tournamentResponse.ok) {
@@ -307,6 +383,7 @@ export default function Home() {
                 date: displayDate(row.tournament_date ?? row.date),
                 location: String(row.location ?? ""),
                 status: String(row.status ?? "UPCOMING") as TournamentStatus,
+                format: getTournamentFormat(row),
               }))
             );
           }
@@ -321,7 +398,7 @@ export default function Home() {
               "/rest/v1/player_total_points?select=*"
             ),
             supabaseFetch(
-              "/rest/v1/players?select=id,name,nickname,is_active&order=name.asc"
+              "/rest/v1/players?select=*&order=name.asc"
             ),
           ]);
 
@@ -364,7 +441,7 @@ export default function Home() {
     setTeamRows([]);
     setTeamMemberRows([]);
 
-    if (!tournament.id || tournament.id.startsWith("nodata-")) return;
+    if (!tournament.id || tournament.id.startsWith("nodata-") || tournament.format === "NO DATA") return;
 
     setDetailLoading(true);
 
@@ -377,9 +454,7 @@ export default function Home() {
             )}`
           ),
           supabaseFetch(
-            `/rest/v1/custom_registrations?select=*&tournament_id=eq.${encodeURIComponent(
-              tournament.id
-            )}`
+            `/rest/v1/custom_registrations?select=*`
           ),
           supabaseFetch(
             `/rest/v1/teams?select=*&tournament_id=eq.${encodeURIComponent(
@@ -453,7 +528,8 @@ export default function Home() {
         name: "NO DATA",
         date: "",
         location: "",
-        status: "UPCOMING",
+        status: "NO DATA",
+        format: "NO DATA",
       });
     }
 
@@ -464,16 +540,21 @@ export default function Home() {
     (t) => t.status === "FINISHED"
   ).length;
 
-  // The user only sees an ID. Supabase Auth receives an internal synthetic email address.\n  const accountEmail = (id: string) =>
+  // Supabase Auth itself uses email internally, but the public UI uses ID only.
+  // The synthetic address is never shown to members.
+  const accountEmail = (id: string) =>
     `${id.trim().toLowerCase()}@id.midnightbey.club`;
 
   const signUp = async () => {
-    if (!loginId.trim() || !password) {
-      setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
+    const id = loginId.trim();
+    const name = displayName.trim();
+
+    if (!id || !password || !name) {
+      setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED.");
       return;
     }
 
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(loginId.trim())) {
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) {
       setAccountMessage("ID MUST BE 3-32 CHARACTERS.");
       return;
     }
@@ -486,11 +567,11 @@ export default function Home() {
         method: "POST",
         headers: apiHeaders(),
         body: JSON.stringify({
-          email: accountEmail(loginId),
+          email: accountEmail(id),
           password,
           data: {
-            login_id: loginId.trim(),
-            display_name: displayName.trim(),
+            login_id: id,
+            display_name: name,
           },
         }),
       });
@@ -498,39 +579,71 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data?.msg || data?.message || "SIGN UP FAILED.");
+        throw new Error(data?.msg || data?.message || data?.error_description || "SIGN UP FAILED.");
       }
 
-      if (data?.access_token) {
-        const nextSession: Session = data;
-        setSession(nextSession);
-        window.localStorage.setItem(
-          "midnight_session",
-          JSON.stringify(nextSession)
-        );
-        await syncAccount(
-          nextSession.access_token,
-          data.user?.id,
-          loginId.trim(),
-          displayName.trim()
-        );
-        setAccountMessage("ACCOUNT CREATED.");
-      } else {
-        setAccountMessage(
-          "ACCOUNT CREATED. IF EMAIL CONFIRMATION IS ENABLED, THE ACCOUNT MUST BE CONFIRMED BY THE SITE OWNER."
-        );
+      if (!data?.access_token || !data?.user?.id) {
+        setAccountMessage("ACCOUNT CREATED. CONFIRMATION IS REQUIRED IN SUPABASE AUTH SETTINGS.");
+        return;
       }
-    } catch (error) {
-      setAccountMessage(
-        error instanceof Error ? error.message : "SIGN UP FAILED."
+
+      const nextSession: Session = data;
+      setSession(nextSession);
+      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+
+      await syncAccount(nextSession.access_token, data.user.id, id, name);
+
+      const playerResponse = await supabaseFetch(
+        "/rest/v1/players",
+        {
+          method: "POST",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({
+            name,
+            nickname: name,
+            user_id: data.user.id,
+            is_active: true,
+          }),
+        },
+        nextSession.access_token
       );
+
+      if (!playerResponse.ok) {
+        const body = await playerResponse.text();
+        throw new Error(`PLAYER PROFILE CREATE FAILED: ${body}`);
+      }
+
+      const playerData = await playerResponse.json();
+      const createdPlayer = Array.isArray(playerData) ? playerData[0] : null;
+      if (createdPlayer?.id) {
+        const linkResponse = await supabaseFetch(
+          `/rest/v1/accounts?id=eq.${encodeURIComponent(data.user.id)}`,
+          {
+            method: "PATCH",
+            headers: { Prefer: "return=minimal" },
+            body: JSON.stringify({ player_id: createdPlayer.id }),
+          },
+          nextSession.access_token
+        );
+
+        if (!linkResponse.ok) {
+          throw new Error(`ACCOUNT PLAYER LINK FAILED: ${await linkResponse.text()}`);
+        }
+
+        setSelectedPlayerId(String(createdPlayer.id));
+      }
+
+      setAccountMessage("ACCOUNT CREATED. PLAYER PROFILE CREATED.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "SIGN UP FAILED.");
     } finally {
       setAccountLoading(false);
     }
   };
 
   const login = async () => {
-    if (!loginId.trim() || !password) {
+    const id = loginId.trim();
+    if (!id || !password) {
       setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
       return;
     }
@@ -539,44 +652,30 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/auth/v1/token?grant_type=password`,
-        {
-          method: "POST",
-          headers: apiHeaders(),
-          body: JSON.stringify({
-            email: accountEmail(loginId),
-            password,
-          }),
-        }
-      );
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify({
+          email: accountEmail(id),
+          password,
+        }),
+      });
 
       const data = await response.json();
 
-      if (!response.ok || !data?.access_token) {
-        throw new Error(
-          data?.error_description || data?.msg || "LOGIN FAILED."
-        );
+      if (!response.ok || !data?.access_token || !data?.user?.id) {
+        throw new Error(data?.error_description || data?.msg || "LOGIN FAILED.");
       }
 
       const nextSession: Session = data;
       setSession(nextSession);
-      window.localStorage.setItem(
-        "midnight_session",
-        JSON.stringify(nextSession)
-      );
+      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
 
-      await syncAccount(
-        nextSession.access_token,
-        data.user?.id,
-        loginId.trim(),
-        displayName.trim()
-      );
+      await syncAccount(nextSession.access_token, data.user.id, id, displayName.trim());
+      await loadAccountProfile(nextSession.access_token, data.user.id);
       setAccountMessage("LOGGED IN.");
     } catch (error) {
-      setAccountMessage(
-        error instanceof Error ? error.message : "LOGIN FAILED."
-      );
+      setAccountMessage(error instanceof Error ? error.message : "LOGIN FAILED.");
     } finally {
       setAccountLoading(false);
     }
@@ -590,6 +689,11 @@ export default function Home() {
   ) => {
     if (!userId) return;
 
+    const body: Record<string, unknown> = {
+      id: userId,
+      display_name: name || id || "PLAYER",
+    };
+
     const accountResponse = await supabaseFetch(
       "/rest/v1/accounts?on_conflict=id",
       {
@@ -597,16 +701,13 @@ export default function Home() {
         headers: {
           Prefer: "resolution=merge-duplicates,return=minimal",
         },
-        body: JSON.stringify({
-          id: userId,
-          display_name: name || id || "PLAYER",
-        }),
+        body: JSON.stringify(body),
       },
       accessToken
     );
 
     if (!accountResponse.ok) {
-      console.warn("Account row could not be synced.");
+      throw new Error(`ACCOUNT SYNC FAILED: ${await accountResponse.text()}`);
     }
   };
 
@@ -621,31 +722,22 @@ export default function Home() {
 
     try {
       const response = await supabaseFetch(
-        "/rest/v1/player_account_links",
+        `/rest/v1/accounts?id=eq.${encodeURIComponent(session.user.id)}`,
         {
-          method: "POST",
-          headers: {
-            Prefer: "resolution=merge-duplicates,return=minimal",
-          },
-          body: JSON.stringify({
-            user_id: session.user.id,
-            player_id: selectedPlayerId,
-            status: "pending",
-          }),
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ player_id: selectedPlayerId }),
         },
         session.access_token
       );
 
       if (!response.ok) {
-        const body = await response.text();
-        throw new Error(body || "PLAYER LINK FAILED.");
+        throw new Error(await response.text());
       }
 
-      setAccountMessage("PLAYER LINK REQUEST SENT.");
+      setAccountMessage("PLAYER LINKED.");
     } catch (error) {
-      setAccountMessage(
-        error instanceof Error ? error.message : "PLAYER LINK FAILED."
-      );
+      setAccountMessage(error instanceof Error ? error.message : "PLAYER LINK FAILED.");
     } finally {
       setAccountLoading(false);
     }
@@ -653,6 +745,10 @@ export default function Home() {
 
   const logout = () => {
     setSession(null);
+    setAccountIsAdmin(false);
+    setSelectedPlayerId("");
+    setLoginId("");
+    setPassword("");
     window.localStorage.removeItem("midnight_session");
     setAccountMessage("LOGGED OUT.");
   };
@@ -663,24 +759,34 @@ export default function Home() {
       return;
     }
 
-    const response = await supabaseFetch(
-      `/rest/v1/accounts?select=is_admin&limit=1&id=eq.${encodeURIComponent(
-        session.user.id
-      )}`,
-      {},
-      session.access_token
-    );
+    setAccountLoading(true);
+    setAccountMessage("");
 
-    if (!response.ok) {
-      setAccountMessage("ADMIN CHECK FAILED.");
-      return;
-    }
+    try {
+      const response = await supabaseFetch(
+        `/rest/v1/accounts?select=is_admin&id=eq.${encodeURIComponent(session.user.id)}&limit=1`,
+        {},
+        session.access_token
+      );
 
-    const rows = await response.json();
-    if (rows?.[0]?.is_admin === true) {
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const rows = await response.json();
+      const isAdmin = Array.isArray(rows) && rows[0]?.is_admin === true;
+      setAccountIsAdmin(isAdmin);
+
+      if (!isAdmin) {
+        setAccountMessage("ADMIN ACCESS REQUIRED.");
+        return;
+      }
+
       window.location.href = "/admin";
-    } else {
-      setAccountMessage("ADMIN ACCESS REQUIRED.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "ADMIN CHECK FAILED.");
+    } finally {
+      setAccountLoading(false);
     }
   };
 
@@ -839,6 +945,9 @@ export default function Home() {
                   <p className="location">
                     {tournament.location || "ARCHIVE SLOT"}
                   </p>
+                  {!noData && (
+                    <p className="format-label">{tournament.format}</p>
+                  )}
                 </div>
 
                 <div className="card-arrow">
@@ -988,7 +1097,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / #{String(selectedTournament.id).padStart(2, "0")}
+              TOURNAMENT / {selectedTournament.format}
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -1029,9 +1138,15 @@ export default function Home() {
                           : undefined;
                         const custom =
                           getCustomData(row) ??
-                          (customRow
-                            ? getCustomData(customRow)
-                            : null);
+                          (customRow ? getCustomData(customRow) : null);
+                        const threeBeys =
+                          selectedTournament.format === "3ON3"
+                            ? getThreeBeys(row).length
+                              ? getThreeBeys(row)
+                              : customRow
+                                ? getThreeBeys(customRow)
+                                : []
+                            : [];
 
                         return (
                           <div className="result-card" key={String(row.id ?? index)}>
@@ -1050,14 +1165,28 @@ export default function Home() {
                                 </span>
                               )}
 
-                              {custom && (
+                              {selectedTournament.format === "3ON3" && threeBeys.length > 0 ? (
                                 <div className="custom-box">
-                                  <div className="custom-label">
-                                    CUSTOM
+                                  <div className="custom-label">3 BEYS</div>
+                                  <div className="three-bey-grid">
+                                    {threeBeys.map((bey, beyIndex) => (
+                                      <div className="three-bey-card" key={beyIndex}>
+                                        <span>BEY {beyIndex + 1}</span>
+                                        {renderData(
+                                          typeof bey === "string"
+                                            ? (() => { try { return JSON.parse(bey); } catch { return bey; } })()
+                                            : bey
+                                        )}
+                                      </div>
+                                    ))}
                                   </div>
+                                </div>
+                              ) : custom ? (
+                                <div className="custom-box">
+                                  <div className="custom-label">CUSTOM</div>
                                   {renderData(custom)}
                                 </div>
-                              )}
+                              ) : null}
                             </div>
                           </div>
                         );
@@ -1066,7 +1195,7 @@ export default function Home() {
                   )}
                 </div>
 
-                {teamRows.length > 0 && (
+                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
                   <div className="detail-block">
                     <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
@@ -1169,7 +1298,8 @@ export default function Home() {
               <>
                 <h2>ACCOUNT</h2>
                 <p className="account-email">
-                  {loginId || "SIGNED IN"}
+                  ID / {loginId || "SIGNED IN"}
+                  {accountIsAdmin ? " / ADMIN" : ""}
                 </p>
 
                 <div className="account-block">
@@ -1240,7 +1370,7 @@ export default function Home() {
                     type="text"
                     value={loginId}
                     onChange={(event) =>
-                      setLoginId(event.target.value.replace(/\\s/g, ""))
+                      setLoginId(event.target.value.replace(/\s/g, ""))
                     }
                     placeholder="YOUR ID"
                     autoComplete="username"
@@ -1671,6 +1801,35 @@ export default function Home() {
           bottom: 18px;
           color: #80798a;
           font-size: 22px;
+        }
+
+        .format-label {
+          margin: 8px 0 0;
+          color: #9c68ed;
+          font-size: 8px;
+          font-weight: 800;
+          letter-spacing: 0.2em;
+        }
+
+        .three-bey-grid {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 8px;
+        }
+
+        .three-bey-card {
+          padding: 12px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.025);
+        }
+
+        .three-bey-card > span {
+          display: block;
+          margin-bottom: 8px;
+          color: #9c68ed;
+          font-size: 8px;
+          font-weight: 800;
+          letter-spacing: 0.15em;
         }
 
         .ranking-section {
@@ -2184,6 +2343,10 @@ export default function Home() {
 
           .tournament-card {
             min-height: 260px;
+          }
+
+          .three-bey-grid {
+            grid-template-columns: 1fr;
           }
 
           .ranking-head,

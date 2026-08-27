@@ -573,6 +573,11 @@ export default function Home() {
       return;
     }
 
+    if (password.length < 6) {
+      setAccountMessage("PASSWORD MUST BE AT LEAST 6 CHARACTERS.");
+      return;
+    }
+
     setAccountLoading(true);
     setAccountMessage("");
 
@@ -593,7 +598,11 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data?.msg || data?.message || data?.error_description || "SIGN UP FAILED.");
+        const authMessage = String(data?.msg || data?.message || data?.error_description || "SIGN UP FAILED.");
+        if (response.status === 429 || /rate limit|too many requests/i.test(authMessage)) {
+          throw new Error("SIGN UP RATE LIMIT. WAIT A LITTLE, THEN TRY AGAIN. IF THE ID WAS ALREADY CREATED, USE LOGIN.");
+        }
+        throw new Error(authMessage);
       }
 
       if (!data?.access_token || !data?.user?.id) {
@@ -696,8 +705,36 @@ export default function Home() {
 
     try {
       let token = session.access_token;
+      const accountId = session.user.id;
+
+      let ensure = await supabaseFetch(
+        `/rest/v1/accounts?on_conflict=id`,
+        {
+          method: "POST",
+          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify({ id: accountId, display_name: loginId.trim() || "PLAYER" }),
+        },
+        token
+      );
+      if (ensure.status === 401) {
+        const refreshed = await refreshStoredSession();
+        if (!refreshed) throw new Error("SESSION EXPIRED. PLEASE LOG IN AGAIN.");
+        token = refreshed.access_token;
+        setSession(refreshed);
+        ensure = await supabaseFetch(
+          `/rest/v1/accounts?on_conflict=id`,
+          {
+            method: "POST",
+            headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+            body: JSON.stringify({ id: accountId, display_name: loginId.trim() || "PLAYER" }),
+          },
+          token
+        );
+      }
+      if (!ensure.ok) throw new Error(`ACCOUNT LINK SETUP FAILED: ${await ensure.text()}`);
+
       let response = await supabaseFetch(
-        `/rest/v1/accounts?id=eq.${encodeURIComponent(session.user.id)}`,
+        `/rest/v1/accounts?id=eq.${encodeURIComponent(accountId)}`,
         {
           method: "PATCH",
           headers: { Prefer: "return=minimal" },
@@ -964,7 +1001,7 @@ export default function Home() {
           </div>
         ) : (
           <>
-            <div className="ranking-table">
+            <div className="ranking-table purple-list">
               <div className="ranking-head simple">
                 <span>RANK</span>
                 <span>PLAYER</span>
@@ -1099,7 +1136,7 @@ export default function Home() {
                   <span>
                     {selectedTournament.location || "LOCATION TBA"}
                   </span>
-                  <span>{selectedTournament.status}</span>
+                  <span>{selectedTournament.status}</span><span>3ON3 + TEAM BATTLE</span>
                 </div>
 
                 <div className="detail-block">
@@ -1119,13 +1156,11 @@ export default function Home() {
                           getCustomData(row) ??
                           (customRow ? getCustomData(customRow) : null);
                         const threeBeys =
-                          selectedTournament.format === "3ON3"
-                            ? getThreeBeys(row).length
-                              ? getThreeBeys(row)
-                              : customRow
-                                ? getThreeBeys(customRow)
-                                : []
-                            : [];
+                          getThreeBeys(row).length
+                            ? getThreeBeys(row)
+                            : customRow
+                              ? getThreeBeys(customRow)
+                              : [];
 
                         return (
                           <div className="result-card" key={String(row.id ?? index)}>
@@ -1822,6 +1857,10 @@ export default function Home() {
         }
 
         .ranking-head.simple,
+        .ranking-table.purple-list .ranking-head,
+        .ranking-table.purple-list .ranking-row,
+        .ranking-table.purple-list .ranking-row * { color: #9d6cff !important; }
+
         .ranking-row.simple {
           grid-template-columns: 100px 1fr 140px;
         }

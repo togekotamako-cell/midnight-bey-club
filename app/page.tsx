@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
 
 type Tournament = {
-  id: string;
+  id: number;
   name: string;
   date: string;
   location: string;
@@ -39,21 +39,21 @@ const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 
 const fallbackTournaments: Tournament[] = [
   {
-    id: "fallback-1",
+    id: 1,
     name: "MIDNIGHT BEY CLUB #01",
     date: "2026.09.12",
     location: "KANAGAWA",
     status: "ENTRY OPEN",
   },
   {
-    id: "fallback-2",
+    id: 2,
     name: "MIDNIGHT BEY CLUB #02",
     date: "2026.10.10",
     location: "YOKOHAMA",
     status: "UPCOMING",
   },
   {
-    id: "fallback-3",
+    id: 3,
     name: "MIDNIGHT BEY CLUB #03",
     date: "",
     location: "",
@@ -294,7 +294,7 @@ export default function Home() {
 
       try {
         const tournamentResponse = await supabaseFetch(
-          "/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=tournament_date.asc"
+          "/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=id.asc"
         );
 
         if (tournamentResponse.ok) {
@@ -302,7 +302,7 @@ export default function Home() {
           if (Array.isArray(rows) && rows.length) {
             setTournaments(
               rows.map((row: ResultRow) => ({
-                id: String(row.id),
+                id: Number(row.id),
                 name: String(row.name ?? `MIDNIGHT BEY CLUB #${row.id}`),
                 date: displayDate(row.tournament_date ?? row.date),
                 location: String(row.location ?? ""),
@@ -364,7 +364,7 @@ export default function Home() {
     setTeamRows([]);
     setTeamMemberRows([]);
 
-    if (!tournament.id || tournament.id.startsWith("nodata-")) return;
+    if (!tournament.id || tournament.id < 0) return;
 
     setDetailLoading(true);
 
@@ -435,21 +435,15 @@ export default function Home() {
   };
 
   const tournamentCards = useMemo(() => {
-    // Only real tournament records with a name are shown as tournaments.
-    // Empty/placeholder DB rows are treated as NO DATA instead of exposing UUIDs.
-    const actual = [...tournaments]
-      .filter((t) => t.name && t.name.trim() && t.name !== "NO DATA")
-      .sort((a, b) => {
-        const da = a.date || "9999.99.99";
-        const db = b.date || "9999.99.99";
-        return da.localeCompare(db);
-      });
+    const actual = [...tournaments].sort((a, b) => a.id - b.id);
 
-    const cards: Tournament[] = actual.map((t) => ({ ...t }));
+    const cards: Tournament[] = [...actual];
+    const maxId = actual.reduce((max, item) => Math.max(max, item.id), 0);
 
     while (cards.length < 3) {
+      const id = Math.max(cards.length + 1, maxId + 1);
       cards.push({
-        id: `nodata-${cards.length + 1}`,
+        id,
         name: "NO DATA",
         date: "",
         location: "",
@@ -757,7 +751,7 @@ export default function Home() {
         </div>
 
         <div className="tournament-grid">
-          {tournamentCards.map((tournament, index) => {
+          {tournamentCards.map((tournament) => {
             const noData = tournament.name === "NO DATA";
 
             return (
@@ -768,7 +762,7 @@ export default function Home() {
                 type="button"
                 aria-label={
                   noData
-                    ? `Tournament ${index + 1}, no data`
+                    ? `Tournament ${tournament.id}, no data`
                     : tournament.name
                 }
               >
@@ -780,7 +774,7 @@ export default function Home() {
                   >
                     {noData ? "NO DATA" : tournament.status}
                   </span>
-                  <span>#{String(index + 1).padStart(2, "0")}</span>
+                  <span>#{String(tournament.id).padStart(2, "0")}</span>
                 </div>
 
                 <div className="card-main">

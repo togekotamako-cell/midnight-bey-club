@@ -27,14 +27,7 @@ type Player = {
 
 type ResultRow = Record<string, unknown>;
 
-type Session = {
-  access_token: string;
-  refresh_token?: string;
-  user?: {
-    id: string;
-    email?: string;
-  };
-};
+type Session = { access_token: string; user: { id: string }; login_id?: string; display_name?: string; player_id?: string | null; is_admin?: boolean };
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
@@ -94,28 +87,6 @@ async function supabaseFetch(
     },
     cache: "no-store",
   });
-}
-
-async function refreshStoredSession(): Promise<Session | null> {
-  if (typeof window === "undefined" || !SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
-  const raw = window.localStorage.getItem("midnight_session");
-  if (!raw) return null;
-  try {
-    const current = JSON.parse(raw) as Session;
-    if (!current.refresh_token) return null;
-    const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-      method: "POST",
-      headers: apiHeaders(),
-      body: JSON.stringify({ refresh_token: current.refresh_token }),
-    });
-    if (!response.ok) return null;
-    const next = (await response.json()) as Session;
-    if (!next?.access_token || !next?.user?.id) return null;
-    window.localStorage.setItem("midnight_session", JSON.stringify(next));
-    return next;
-  } catch {
-    return null;
-  }
 }
 
 function displayDate(value: unknown) {
@@ -339,59 +310,28 @@ export default function Home() {
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      const saved = typeof window !== "undefined" ? window.localStorage.getItem("midnight_session") : null;
-      if (!saved) return;
-      try {
-        let current = JSON.parse(saved) as Session;
-        if (!current?.access_token || !current?.user?.id) return;
-        const probe = await supabaseFetch(`/rest/v1/accounts?select=id&id=eq.${encodeURIComponent(current.user.id)}&limit=1`, {}, current.access_token);
-        if (probe.status === 401) {
-          const refreshed = await refreshStoredSession();
-          if (refreshed) current = refreshed;
-          else { window.localStorage.removeItem("midnight_session"); return; }
-        }
-        if (alive) setSession(current);
-      } catch {
-        window.localStorage.removeItem("midnight_session");
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  const loadAccountProfile = async (accessToken: string, userId: string) => {
-    try {
-      const response = await supabaseFetch(
-        `/rest/v1/accounts?select=player_id,is_admin,display_name&id=eq.${encodeURIComponent(userId)}&limit=1`,
-        {},
-        accessToken
-      );
-
-      if (!response.ok) return;
-
-      const rows = await response.json();
-      const account = Array.isArray(rows) ? rows[0] : null;
-      if (!account) return;
-
-      setAccountIsAdmin(account.is_admin === true);
-      if (account.display_name && !displayName) {
-        setDisplayName(String(account.display_name));
-      }
-      if (account.player_id) {
-        setSelectedPlayerId(String(account.player_id));
-      }
-    } catch (error) {
-      console.warn("Account profile could not be loaded.", error);
-    }
+  const rpc = async (name: string, body: Record<string, unknown>) => {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
+      method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body), cache: "no-store"
+    });
+    const text = await response.text(); let data: any = null;
+    try { data = text ? JSON.parse(text) : null; } catch {}
+    if (!response.ok) throw new Error(data?.message || data?.error || text || "REQUEST FAILED.");
+    return data;
   };
 
   useEffect(() => {
-    if (session?.access_token && session.user?.id) {
-      loadAccountProfile(session.access_token, session.user.id);
-    }
-  }, [session]);
+    const saved = typeof window !== "undefined" ? window.localStorage.getItem("midnight_session") : null;
+    if (!saved) return;
+    try { const current = JSON.parse(saved) as Session; if (!current?.access_token || !current?.user?.id) throw new Error(); setSession(current); setDisplayName(current.display_name || ""); setLoginId(current.login_id || ""); setSelectedPlayerId(current.player_id || ""); setAccountIsAdmin(current.is_admin === true); } catch { window.localStorage.removeItem("midnight_session"); }
+  }, []);
+
+  const loadAccountProfile = async (accessToken: string) => {
+    try { const data = await rpc("get_account_session", { p_access_token: accessToken }); if (!data) return; setAccountIsAdmin(data.is_admin === true); setDisplayName(String(data.display_name || "")); setSelectedPlayerId(data.player_id ? String(data.player_id) : ""); } catch {}
+  };
+
+  useEffect(() => { if (session?.access_token) loadAccountProfile(session.access_token); }, [session]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -418,22 +358,35 @@ export default function Home() {
           }
         }
 
-        const playerResponse = await supabaseFetch(
-          "/rest/v1/players?select=id,name,nickname,points,wins,tournaments,is_active&order=points.desc,name.asc"
-        );
-        const playerRows = playerResponse.ok ? await playerResponse.json() : [];
-        const merged = Array.isArray(playerRows)
-          ? playerRows.map((row: ResultRow, index: number) => ({
-              id: String(row.id),
-              name: String(row.name ?? "PLAYER"),
-              nickname: row.nickname == null ? null : String(row.nickname),
-              rank: index + 1,
-              points: Number(row.points ?? 0),
-              wins: Number(row.wins ?? 0),
-              tournaments: Number(row.tournaments ?? 0),
-            })).sort((a, b) => b.points - a.points || a.name.localeCompare(b.name))
-              .map((player, index) => ({ ...player, rank: index + 1 }))
+        const [rankingResponse, totalResponse, playerResponse] =
+          await Promise.all([
+            supabaseFetch(
+              "/rest/v1/player_rankings?select=*&order=points.desc"
+            ),
+            supabaseFetch(
+              "/rest/v1/player_total_points?select=*"
+            ),
+            supabaseFetch(
+              "/rest/v1/players?select=*&order=name.asc"
+            ),
+          ]);
+
+        const rankingRows = rankingResponse.ok
+          ? await rankingResponse.json()
           : [];
+        const totalRows = totalResponse.ok ? await totalResponse.json() : [];
+        const playerRows = playerResponse.ok
+          ? await playerResponse.json()
+          : [];
+
+        const merged = mergePlayers(
+          Array.isArray(rankingRows) ? rankingRows : [],
+          Array.isArray(totalRows) && totalRows.length
+            ? totalRows
+            : Array.isArray(playerRows)
+              ? playerRows
+              : []
+        );
 
         if (merged.length) {
           setPlayers(merged);
@@ -552,288 +505,43 @@ export default function Home() {
     return cards;
   }, [tournaments]);
 
-  const historyCount = 8;
-
-  // Supabase Auth itself uses email internally, but the public UI uses ID only.
-  // The synthetic address is never shown to members.
-  const accountEmail = (id: string) =>
-    `${id.trim().toLowerCase()}@id.midnightbey.club`;
+  const historyCount = tournaments.filter(
+    (t) => t.status === "FINISHED"
+  ).length;
 
   const signUp = async () => {
-    const id = loginId.trim();
-    const name = displayName.trim();
-
-    if (!id || !password || !name) {
-      setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED.");
-      return;
-    }
-
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) {
-      setAccountMessage("ID MUST BE 3-32 CHARACTERS.");
-      return;
-    }
-
-    if (password.length < 6) {
-      setAccountMessage("PASSWORD MUST BE AT LEAST 6 CHARACTERS.");
-      return;
-    }
-
-    setAccountLoading(true);
-    setAccountMessage("");
-
+    const id = loginId.trim(), name = displayName.trim();
+    if (!id || !name || !password) { setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED."); return; }
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) { setAccountMessage("ID MUST BE 3-32 CHARACTERS."); return; }
+    if (password.length < 6) { setAccountMessage("PASSWORD MUST BE AT LEAST 6 CHARACTERS."); return; }
+    setAccountLoading(true); setAccountMessage("");
     try {
-      const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({
-          email: accountEmail(id),
-          password,
-          data: {
-            login_id: id,
-            display_name: name,
-          },
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        const authMessage = String(data?.msg || data?.message || data?.error_description || "SIGN UP FAILED.");
-        if (response.status === 429 || /rate limit|too many requests/i.test(authMessage)) {
-          throw new Error("SIGN UP RATE LIMIT. WAIT A LITTLE, THEN TRY AGAIN. IF THE ID WAS ALREADY CREATED, USE LOGIN.");
-        }
-        throw new Error(authMessage);
-      }
-
-      if (!data?.access_token || !data?.user?.id) {
-        setAccountMessage("ACCOUNT CREATED. CONFIRMATION IS REQUIRED IN SUPABASE AUTH SETTINGS.");
-        return;
-      }
-
-      const nextSession: Session = data;
-      setSession(nextSession);
-      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
-
-      await syncAccount(nextSession.access_token, data.user.id, id, name);
-
-      setAccountMessage("ACCOUNT CREATED. YOU CAN LINK A PLAYER NOW OR LATER.");
-    } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "SIGN UP FAILED.");
-    } finally {
-      setAccountLoading(false);
-    }
+      const data = await rpc("register_account", { p_login_id:id, p_password:password, p_display_name:name });
+      const next: Session = { access_token:String(data.access_token), user:{id:String(data.user_id)}, login_id:String(data.login_id||id), display_name:String(data.display_name||name), player_id:data.player_id?String(data.player_id):null, is_admin:data.is_admin===true };
+      localStorage.setItem("midnight_session", JSON.stringify(next)); setSession(next); setAccountIsAdmin(next.is_admin===true); setSelectedPlayerId(next.player_id||"");
+      setAccountMessage("ACCOUNT CREATED.");
+    } catch(e) { setAccountMessage(e instanceof Error ? e.message : "SIGN UP FAILED."); } finally { setAccountLoading(false); }
   };
 
   const login = async () => {
-    const id = loginId.trim();
-    if (!id || !password) {
-      setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
-      return;
-    }
-
-    setAccountLoading(true);
-    setAccountMessage("");
-
+    const id=loginId.trim(); if(!id||!password){setAccountMessage("ID AND PASSWORD ARE REQUIRED.");return;}
+    setAccountLoading(true); setAccountMessage("");
     try {
-      const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({
-          email: accountEmail(id),
-          password,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data?.access_token || !data?.user?.id) {
-        throw new Error(data?.error_description || data?.msg || "LOGIN FAILED.");
-      }
-
-      const nextSession: Session = data;
-      setSession(nextSession);
-      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
-
-      await syncAccount(nextSession.access_token, data.user.id, id, displayName.trim());
-      await loadAccountProfile(nextSession.access_token, data.user.id);
-      setAccountMessage("LOGGED IN.");
-    } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "LOGIN FAILED.");
-    } finally {
-      setAccountLoading(false);
-    }
-  };
-
-  const syncAccount = async (
-    accessToken: string,
-    userId?: string,
-    id?: string,
-    name?: string
-  ) => {
-    if (!userId) return;
-
-    const body: Record<string, unknown> = {
-      id: userId,
-      display_name: name || id || "PLAYER",
-    };
-
-    const accountResponse = await supabaseFetch(
-      "/rest/v1/accounts?on_conflict=id",
-      {
-        method: "POST",
-        headers: {
-          Prefer: "resolution=merge-duplicates,return=minimal",
-        },
-        body: JSON.stringify(body),
-      },
-      accessToken
-    );
-
-    if (!accountResponse.ok) {
-      throw new Error(`ACCOUNT SYNC FAILED: ${await accountResponse.text()}`);
-    }
+      const data=await rpc("login_account",{p_login_id:id,p_password:password});
+      const next: Session={access_token:String(data.access_token),user:{id:String(data.user_id)},login_id:String(data.login_id||id),display_name:String(data.display_name||""),player_id:data.player_id?String(data.player_id):null,is_admin:data.is_admin===true};
+      localStorage.setItem("midnight_session",JSON.stringify(next)); setSession(next); setDisplayName(next.display_name||""); setAccountIsAdmin(next.is_admin===true); setSelectedPlayerId(next.player_id||""); setAccountMessage("LOGGED IN.");
+    } catch(e){setAccountMessage(e instanceof Error?e.message:"LOGIN FAILED.");} finally{setAccountLoading(false);}
   };
 
   const linkPlayer = async () => {
-    if (!session?.access_token || !session.user?.id || !selectedPlayerId) {
-      setAccountMessage("SELECT YOUR PLAYER.");
-      return;
-    }
-
-    setAccountLoading(true);
-    setAccountMessage("");
-
-    try {
-      let token = session.access_token;
-      const accountId = session.user.id;
-
-      let ensure = await supabaseFetch(
-        `/rest/v1/accounts?on_conflict=id`,
-        {
-          method: "POST",
-          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-          body: JSON.stringify({ id: accountId, display_name: loginId.trim() || "PLAYER" }),
-        },
-        token
-      );
-      if (ensure.status === 401) {
-        const refreshed = await refreshStoredSession();
-        if (!refreshed) throw new Error("SESSION EXPIRED. PLEASE LOG IN AGAIN.");
-        token = refreshed.access_token;
-        setSession(refreshed);
-        ensure = await supabaseFetch(
-          `/rest/v1/accounts?on_conflict=id`,
-          {
-            method: "POST",
-            headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-            body: JSON.stringify({ id: accountId, display_name: loginId.trim() || "PLAYER" }),
-          },
-          token
-        );
-      }
-      if (!ensure.ok) throw new Error(`ACCOUNT LINK SETUP FAILED: ${await ensure.text()}`);
-
-      let response = await supabaseFetch(
-        `/rest/v1/accounts?id=eq.${encodeURIComponent(accountId)}`,
-        {
-          method: "PATCH",
-          headers: { Prefer: "return=minimal" },
-          body: JSON.stringify({ player_id: selectedPlayerId }),
-        },
-        token
-      );
-
-      if (response.status === 401) {
-        const refreshed = await refreshStoredSession();
-        if (!refreshed) throw new Error("SESSION EXPIRED. PLEASE LOG IN AGAIN.");
-        token = refreshed.access_token;
-        setSession(refreshed);
-        response = await supabaseFetch(
-          `/rest/v1/accounts?id=eq.${encodeURIComponent(session.user.id)}`,
-          {
-            method: "PATCH",
-            headers: { Prefer: "return=minimal" },
-            body: JSON.stringify({ player_id: selectedPlayerId }),
-          },
-          token
-        );
-      }
-
-      if (!response.ok) throw new Error(await response.text());
-      setAccountMessage("PLAYER LINKED.");
-    } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "PLAYER LINK FAILED.");
-    } finally {
-      setAccountLoading(false);
-    }
-  };
-  const logout = () => {
-    setSession(null);
-    setAccountIsAdmin(false);
-    setSelectedPlayerId("");
-    setLoginId("");
-    setPassword("");
-    window.localStorage.removeItem("midnight_session");
-    setAccountMessage("LOGGED OUT.");
+    if(!session?.access_token||!selectedPlayerId){setAccountMessage("SELECT YOUR PLAYER.");return;}
+    setAccountLoading(true); setAccountMessage("");
+    try { await rpc("link_player_account",{p_access_token:session.access_token,p_player_id:selectedPlayerId}); const next={...session,player_id:selectedPlayerId}; localStorage.setItem("midnight_session",JSON.stringify(next)); setSession(next); setAccountMessage("PLAYER LINKED."); } catch(e){setAccountMessage(e instanceof Error?e.message:"PLAYER LINK FAILED.");} finally{setAccountLoading(false);}
   };
 
-  const openAdmin = async () => {
-    if (!session?.access_token || !session.user?.id) {
-      setAccountMessage("LOGIN REQUIRED.");
-      return;
-    }
+  const logout = () => { localStorage.removeItem("midnight_session"); setSession(null); setAccountIsAdmin(false); setSelectedPlayerId(""); setLoginId(""); setPassword(""); setAccountMessage("LOGGED OUT."); };
 
-    setAccountLoading(true);
-    setAccountMessage("");
-
-    try {
-      const response = await supabaseFetch(
-        `/rest/v1/accounts?select=is_admin&id=eq.${encodeURIComponent(session.user.id)}&limit=1`,
-        {},
-        session.access_token
-      );
-
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-
-      const rows = await response.json();
-      const isAdmin = Array.isArray(rows) && rows[0]?.is_admin === true;
-      setAccountIsAdmin(isAdmin);
-
-      if (!isAdmin) {
-        setAccountMessage("ADMIN ACCESS REQUIRED.");
-        return;
-      }
-
-      window.location.href = "/admin";
-    } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "ADMIN CHECK FAILED.");
-    } finally {
-      setAccountLoading(false);
-    }
-  };
-
-  const resultRowsSorted = useMemo(
-    () =>
-      [...resultRows].sort((a, b) => {
-        const ar = getResultRank(a) ?? 999;
-        const br = getResultRank(b) ?? 999;
-        return ar - br;
-      }),
-    [resultRows]
-  );
-
-  const customByPlayer = useMemo(() => {
-    const map = new Map<string, ResultRow>();
-
-    customRows.forEach((row) => {
-      const playerId = stringFrom(row, ["player_id", "playerId"]);
-      if (playerId) map.set(playerId, row);
-    });
-
-    return map;
-  }, [customRows]);
+  const openAdmin = async () => { if(!session?.access_token){setAccountMessage("LOGIN REQUIRED.");return;} if(!accountIsAdmin){setAccountMessage("ADMIN ACCESS REQUIRED.");return;} window.location.href="/admin"; };
 
   return (
     <main className="site">
@@ -970,7 +678,7 @@ export default function Home() {
                     {tournament.location || "ARCHIVE SLOT"}
                   </p>
                   {!noData && (
-                    <p className="format-label">{tournament.format}</p>
+                    <p className="format-label">3ON3 + TEAM</p>
                   )}
                 </div>
 
@@ -1001,25 +709,33 @@ export default function Home() {
           </div>
         ) : (
           <>
-            <div className="ranking-table purple-list">
-              <div className="ranking-head simple">
+            <div className="ranking-table">
+              <div className="ranking-head">
                 <span>RANK</span>
                 <span>PLAYER</span>
+                <span>WINS</span>
+                <span>EVENTS</span>
                 <span>PTS</span>
               </div>
 
               {players.map((player) => (
-                <div className="ranking-row simple" key={player.id}>
-                  <span className="rank">{String(player.rank).padStart(2, "0")}</span>
-                  <span className="player-name">{player.nickname || player.name}</span>
-                  <strong>{player.points} PT</strong>
+                <div className="ranking-row" key={player.id}>
+                  <span className="rank">
+                    {String(player.rank).padStart(2, "0")}
+                  </span>
+                  <span className="player-name">
+                    {player.nickname || player.name}
+                  </span>
+                  <span>{player.wins}</span>
+                  <span>{player.tournaments}</span>
+                  <strong>{player.points}</strong>
                 </div>
               ))}
             </div>
 
             <div className="ranking-note">
               <span>CUMULATIVE POINTS</span>
-              <span>1ST 3PT / 2ND 2PT / 3RD 1PT · TEAM 2PT / 1PT</span>
+              <span>1ST 3PT / 2ND 2PT / 3RD 1PT</span>
             </div>
           </>
         )}
@@ -1041,7 +757,7 @@ export default function Home() {
         <div className="history-content">
           <div className="history-big">
             <span>2026</span>
-            <strong>{String(historyCount).padStart(2, "0")}</strong>
+            <strong>08</strong>
           </div>
 
           <div className="history-text">
@@ -1113,7 +829,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / 3ON3 + TEAM BATTLE
+              TOURNAMENT / 3ON3 + TEAM
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -1136,7 +852,7 @@ export default function Home() {
                   <span>
                     {selectedTournament.location || "LOCATION TBA"}
                   </span>
-                  <span>{selectedTournament.status}</span><span>3ON3 + TEAM BATTLE</span>
+                  <span>{selectedTournament.status}</span>
                 </div>
 
                 <div className="detail-block">
@@ -1209,15 +925,17 @@ export default function Home() {
                   )}
                 </div>
 
-                <div className="detail-block">
-                  <div className="detail-title">TEAM BATTLE RESULTS</div>
-                  {teamRows.length > 0 ? (
+                {teamRows.length > 0 && (
+                  <div className="detail-block">
+                    <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
                       {teamRows.map((team, index) => {
                         const teamId = String(team.id ?? "");
                         const members = teamMemberRows.filter(
                           (member) =>
-                            String(member.team_id ?? member.teamId ?? "") === teamId
+                            String(
+                              member.team_id ?? member.teamId ?? ""
+                            ) === teamId
                         );
 
                         return (
@@ -1234,14 +952,18 @@ export default function Home() {
                               <div className="team-members">
                                 {members.map((member, memberIndex) => {
                                   const playerId = String(
-                                    member.player_id ?? member.playerId ?? ""
+                                    member.player_id ??
+                                      member.playerId ??
+                                      ""
                                   );
                                   const player = players.find(
                                     (p) => p.id === playerId
                                   );
 
                                   return (
-                                    <span key={`${teamId}-${memberIndex}`}>
+                                    <span
+                                      key={`${teamId}-${memberIndex}`}
+                                    >
                                       {player?.nickname ||
                                         player?.name ||
                                         playerId ||
@@ -1255,12 +977,11 @@ export default function Home() {
                         );
                       })}
                     </div>
-                  ) : (
-                    <div className="detail-no-data">NO TEAM BATTLE DATA</div>
-                  )}
-                </div>
+                  </div>
+                )}
 
-                {customRows.length > 0 && (
+                {resultRowsSorted.length === 0 &&
+                  customRows.length > 0 && (
                     <div className="detail-block">
                       <div className="detail-title">CUSTOM</div>
                       <div className="custom-list">
@@ -1856,19 +1577,6 @@ export default function Home() {
           align-items: center;
         }
 
-        .ranking-head.simple,
-        .ranking-table.purple-list .ranking-head,
-        .ranking-table.purple-list .ranking-row,
-        .ranking-table.purple-list .ranking-row * { color: #9d6cff !important; }
-
-        .ranking-row.simple {
-          grid-template-columns: 100px 1fr 140px;
-        }
-
-        .ranking-row.simple strong {
-          text-align: right;
-        }
-
         .ranking-head {
           min-height: 48px;
           color: #5e5966;
@@ -2278,7 +1986,7 @@ export default function Home() {
         }
 
         .account-field input,
-        .account-block select {
+        .account-block select, .account-block select option {
           width: 100%;
           padding: 14px;
           border: 1px solid rgba(255, 255, 255, 0.12);
@@ -2290,15 +1998,6 @@ export default function Home() {
         .account-field input:focus,
         .account-block select:focus {
           border-color: rgba(156, 104, 237, 0.7);
-        }\n\n        .account-block select,\n        .account-block select option {\n          color: #c29cff;\n        }\n\n        .account-block select option {\n          background: #09090d;\n        }
-
-        .account-block select,
-        .account-block select option {
-          color: #c29cff;
-        }
-
-        .account-block select option {
-          background: #09090d;
         }
 
         .account-message {

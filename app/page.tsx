@@ -27,7 +27,14 @@ type Player = {
 
 type ResultRow = Record<string, unknown>;
 
-type Session = { access_token: string; user: { id: string }; login_id?: string; display_name?: string; player_id?: string | null; is_admin?: boolean };
+type Session = {
+  access_token: string;
+  refresh_token?: string;
+  user?: {
+    id: string;
+    email?: string;
+  };
+};
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
@@ -304,50 +311,59 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
+  const [playerPickerOpen, setPlayerPickerOpen] = useState(false);
   const [accountIsAdmin, setAccountIsAdmin] = useState(false);
   const [accountMessage, setAccountMessage] = useState("");
   const [accountLoading, setAccountLoading] = useState(false);
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
-  // Derived tournament-detail data used by the modal.
-  // Keep this here so TypeScript can resolve the names used by the JSX.
-  const resultRowsSorted = useMemo(
-    () => [...resultRows].sort((a, b) => (getResultRank(a) ?? 999) - (getResultRank(b) ?? 999)),
-    [resultRows]
-  );
+  useEffect(() => {
+    const saved =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("midnight_session")
+        : null;
 
-  const customByPlayer = useMemo(() => {
-    const map = new Map<string, ResultRow>();
-    for (const row of customRows) {
-      const playerId = String(row.player_id ?? row.playerId ?? "");
-      if (playerId && !map.has(playerId)) map.set(playerId, row);
+    if (saved) {
+      try {
+        setSession(JSON.parse(saved));
+      } catch {
+        window.localStorage.removeItem("midnight_session");
+      }
     }
-    return map;
-  }, [customRows]);
+  }, []);
 
-  const rpc = async (name: string, body: Record<string, unknown>) => {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
-      method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body), cache: "no-store"
-    });
-    const text = await response.text(); let data: any = null;
-    try { data = text ? JSON.parse(text) : null; } catch {}
-    if (!response.ok) throw new Error(data?.message || data?.error || text || "REQUEST FAILED.");
-    return data;
+  const loadAccountProfile = async (accessToken: string, userId: string) => {
+    try {
+      const response = await supabaseFetch(
+        `/rest/v1/accounts?select=player_id,is_admin,display_name&id=eq.${encodeURIComponent(userId)}&limit=1`,
+        {},
+        accessToken
+      );
+
+      if (!response.ok) return;
+
+      const rows = await response.json();
+      const account = Array.isArray(rows) ? rows[0] : null;
+      if (!account) return;
+
+      setAccountIsAdmin(account.is_admin === true);
+      if (account.display_name && !displayName) {
+        setDisplayName(String(account.display_name));
+      }
+      if (account.player_id) {
+        setSelectedPlayerId(String(account.player_id));
+      }
+    } catch (error) {
+      console.warn("Account profile could not be loaded.", error);
+    }
   };
 
   useEffect(() => {
-    const saved = typeof window !== "undefined" ? window.localStorage.getItem("midnight_session") : null;
-    if (!saved) return;
-    try { const current = JSON.parse(saved) as Session; if (!current?.access_token || !current?.user?.id) throw new Error(); setSession(current); setDisplayName(current.display_name || ""); setLoginId(current.login_id || ""); setSelectedPlayerId(current.player_id || ""); setAccountIsAdmin(current.is_admin === true); } catch { window.localStorage.removeItem("midnight_session"); }
-  }, []);
-
-  const loadAccountProfile = async (accessToken: string) => {
-    try { const data = await rpc("get_account_session", { p_access_token: accessToken }); if (!data) return; setAccountIsAdmin(data.is_admin === true); setDisplayName(String(data.display_name || "")); setSelectedPlayerId(data.player_id ? String(data.player_id) : ""); } catch {}
-  };
-
-  useEffect(() => { if (session?.access_token) loadAccountProfile(session.access_token); }, [session]);
+    if (session?.access_token && session.user?.id) {
+      loadAccountProfile(session.access_token, session.user.id);
+    }
+  }, [session]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -525,39 +541,276 @@ export default function Home() {
     (t) => t.status === "FINISHED"
   ).length;
 
+  // Supabase Auth itself uses email internally, but the public UI uses ID only.
+  // The synthetic address is never shown to members.
+  const accountEmail = (id: string) =>
+    `${id.trim().toLowerCase()}@id.midnightbey.club`;
+
   const signUp = async () => {
-    const id = loginId.trim(), name = displayName.trim();
-    if (!id || !name || !password) { setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED."); return; }
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) { setAccountMessage("ID MUST BE 3-32 CHARACTERS."); return; }
-    if (password.length < 6) { setAccountMessage("PASSWORD MUST BE AT LEAST 6 CHARACTERS."); return; }
-    setAccountLoading(true); setAccountMessage("");
+    const id = loginId.trim();
+    const name = displayName.trim();
+
+    if (!id || !password || !name) {
+      setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED.");
+      return;
+    }
+
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) {
+      setAccountMessage("ID MUST BE 3-32 CHARACTERS.");
+      return;
+    }
+
+    setAccountLoading(true);
+    setAccountMessage("");
+
     try {
-      const data = await rpc("register_account", { p_login_id:id, p_password:password, p_display_name:name });
-      const next: Session = { access_token:String(data.access_token), user:{id:String(data.user_id)}, login_id:String(data.login_id||id), display_name:String(data.display_name||name), player_id:data.player_id?String(data.player_id):null, is_admin:data.is_admin===true };
-      localStorage.setItem("midnight_session", JSON.stringify(next)); setSession(next); setAccountIsAdmin(next.is_admin===true); setSelectedPlayerId(next.player_id||"");
-      setAccountMessage("ACCOUNT CREATED.");
-    } catch(e) { setAccountMessage(e instanceof Error ? e.message : "SIGN UP FAILED."); } finally { setAccountLoading(false); }
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify({
+          email: accountEmail(id),
+          password,
+          data: {
+            login_id: id,
+            display_name: name,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.msg || data?.message || data?.error_description || "SIGN UP FAILED.");
+      }
+
+      if (!data?.access_token || !data?.user?.id) {
+        setAccountMessage("ACCOUNT CREATED. CONFIRMATION IS REQUIRED IN SUPABASE AUTH SETTINGS.");
+        return;
+      }
+
+      const nextSession: Session = data;
+      setSession(nextSession);
+      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+
+      await syncAccount(nextSession.access_token, data.user.id, id, name);
+
+      const playerResponse = await supabaseFetch(
+        "/rest/v1/players",
+        {
+          method: "POST",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({
+            name,
+            nickname: name,
+            user_id: data.user.id,
+            is_active: true,
+          }),
+        },
+        nextSession.access_token
+      );
+
+      if (!playerResponse.ok) {
+        const body = await playerResponse.text();
+        throw new Error(`PLAYER PROFILE CREATE FAILED: ${body}`);
+      }
+
+      const playerData = await playerResponse.json();
+      const createdPlayer = Array.isArray(playerData) ? playerData[0] : null;
+      if (createdPlayer?.id) {
+        const linkResponse = await supabaseFetch(
+          `/rest/v1/accounts?id=eq.${encodeURIComponent(data.user.id)}`,
+          {
+            method: "PATCH",
+            headers: { Prefer: "return=minimal" },
+            body: JSON.stringify({ player_id: createdPlayer.id }),
+          },
+          nextSession.access_token
+        );
+
+        if (!linkResponse.ok) {
+          throw new Error(`ACCOUNT PLAYER LINK FAILED: ${await linkResponse.text()}`);
+        }
+
+        setSelectedPlayerId(String(createdPlayer.id));
+      }
+
+      setAccountMessage("ACCOUNT CREATED. PLAYER PROFILE CREATED.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "SIGN UP FAILED.");
+    } finally {
+      setAccountLoading(false);
+    }
   };
 
   const login = async () => {
-    const id=loginId.trim(); if(!id||!password){setAccountMessage("ID AND PASSWORD ARE REQUIRED.");return;}
-    setAccountLoading(true); setAccountMessage("");
+    const id = loginId.trim();
+    if (!id || !password) {
+      setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
+      return;
+    }
+
+    setAccountLoading(true);
+    setAccountMessage("");
+
     try {
-      const data=await rpc("login_account",{p_login_id:id,p_password:password});
-      const next: Session={access_token:String(data.access_token),user:{id:String(data.user_id)},login_id:String(data.login_id||id),display_name:String(data.display_name||""),player_id:data.player_id?String(data.player_id):null,is_admin:data.is_admin===true};
-      localStorage.setItem("midnight_session",JSON.stringify(next)); setSession(next); setDisplayName(next.display_name||""); setAccountIsAdmin(next.is_admin===true); setSelectedPlayerId(next.player_id||""); setAccountMessage("LOGGED IN.");
-    } catch(e){setAccountMessage(e instanceof Error?e.message:"LOGIN FAILED.");} finally{setAccountLoading(false);}
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify({
+          email: accountEmail(id),
+          password,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data?.access_token || !data?.user?.id) {
+        throw new Error(data?.error_description || data?.msg || "LOGIN FAILED.");
+      }
+
+      const nextSession: Session = data;
+      setSession(nextSession);
+      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+
+      await syncAccount(nextSession.access_token, data.user.id, id, displayName.trim());
+      await loadAccountProfile(nextSession.access_token, data.user.id);
+      setAccountMessage("LOGGED IN.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "LOGIN FAILED.");
+    } finally {
+      setAccountLoading(false);
+    }
+  };
+
+  const syncAccount = async (
+    accessToken: string,
+    userId?: string,
+    id?: string,
+    name?: string
+  ) => {
+    if (!userId) return;
+
+    const body: Record<string, unknown> = {
+      id: userId,
+      display_name: name || id || "PLAYER",
+    };
+
+    const accountResponse = await supabaseFetch(
+      "/rest/v1/accounts?on_conflict=id",
+      {
+        method: "POST",
+        headers: {
+          Prefer: "resolution=merge-duplicates,return=minimal",
+        },
+        body: JSON.stringify(body),
+      },
+      accessToken
+    );
+
+    if (!accountResponse.ok) {
+      throw new Error(`ACCOUNT SYNC FAILED: ${await accountResponse.text()}`);
+    }
   };
 
   const linkPlayer = async () => {
-    if(!session?.access_token||!selectedPlayerId){setAccountMessage("SELECT YOUR PLAYER.");return;}
-    setAccountLoading(true); setAccountMessage("");
-    try { await rpc("link_player_account",{p_access_token:session.access_token,p_player_id:selectedPlayerId}); const next={...session,player_id:selectedPlayerId}; localStorage.setItem("midnight_session",JSON.stringify(next)); setSession(next); setAccountMessage("PLAYER LINKED."); } catch(e){setAccountMessage(e instanceof Error?e.message:"PLAYER LINK FAILED.");} finally{setAccountLoading(false);}
+    if (!session?.access_token || !session.user?.id || !selectedPlayerId) {
+      setAccountMessage("SELECT YOUR PLAYER.");
+      return;
+    }
+
+    setAccountLoading(true);
+    setAccountMessage("");
+
+    try {
+      const response = await supabaseFetch(
+        `/rest/v1/accounts?id=eq.${encodeURIComponent(session.user.id)}`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ player_id: selectedPlayerId }),
+        },
+        session.access_token
+      );
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      setAccountMessage("PLAYER LINKED.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "PLAYER LINK FAILED.");
+    } finally {
+      setAccountLoading(false);
+    }
   };
 
-  const logout = () => { localStorage.removeItem("midnight_session"); setSession(null); setAccountIsAdmin(false); setSelectedPlayerId(""); setLoginId(""); setPassword(""); setAccountMessage("LOGGED OUT."); };
+  const logout = () => {
+    setSession(null);
+    setAccountIsAdmin(false);
+    setSelectedPlayerId("");
+    setLoginId("");
+    setPassword("");
+    window.localStorage.removeItem("midnight_session");
+    setAccountMessage("LOGGED OUT.");
+  };
 
-  const openAdmin = async () => { if(!session?.access_token){setAccountMessage("LOGIN REQUIRED.");return;} if(!accountIsAdmin){setAccountMessage("ADMIN ACCESS REQUIRED.");return;} window.location.href="/admin"; };
+  const openAdmin = async () => {
+    if (!session?.access_token || !session.user?.id) {
+      setAccountMessage("LOGIN REQUIRED.");
+      return;
+    }
+
+    setAccountLoading(true);
+    setAccountMessage("");
+
+    try {
+      const response = await supabaseFetch(
+        `/rest/v1/accounts?select=is_admin&id=eq.${encodeURIComponent(session.user.id)}&limit=1`,
+        {},
+        session.access_token
+      );
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const rows = await response.json();
+      const isAdmin = Array.isArray(rows) && rows[0]?.is_admin === true;
+      setAccountIsAdmin(isAdmin);
+
+      if (!isAdmin) {
+        setAccountMessage("ADMIN ACCESS REQUIRED.");
+        return;
+      }
+
+      window.location.href = "/admin";
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "ADMIN CHECK FAILED.");
+    } finally {
+      setAccountLoading(false);
+    }
+  };
+
+  const resultRowsSorted = useMemo(
+    () =>
+      [...resultRows].sort((a, b) => {
+        const ar = getResultRank(a) ?? 999;
+        const br = getResultRank(b) ?? 999;
+        return ar - br;
+      }),
+    [resultRows]
+  );
+
+  const customByPlayer = useMemo(() => {
+    const map = new Map<string, ResultRow>();
+
+    customRows.forEach((row) => {
+      const playerId = stringFrom(row, ["player_id", "playerId"]);
+      if (playerId) map.set(playerId, row);
+    });
+
+    return map;
+  }, [customRows]);
 
   return (
     <main className="site">
@@ -694,7 +947,7 @@ export default function Home() {
                     {tournament.location || "ARCHIVE SLOT"}
                   </p>
                   {!noData && (
-                    <p className="format-label">3ON3 + TEAM</p>
+                    <p className="format-label">{tournament.format}</p>
                   )}
                 </div>
 
@@ -773,7 +1026,7 @@ export default function Home() {
         <div className="history-content">
           <div className="history-big">
             <span>2026</span>
-            <strong>08</strong>
+            <strong>{String(historyCount).padStart(2, "0")}</strong>
           </div>
 
           <div className="history-text">
@@ -845,7 +1098,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / 3ON3 + TEAM
+              TOURNAMENT / {selectedTournament.format}
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -888,11 +1141,13 @@ export default function Home() {
                           getCustomData(row) ??
                           (customRow ? getCustomData(customRow) : null);
                         const threeBeys =
-                          getThreeBeys(row).length
-                            ? getThreeBeys(row)
-                            : customRow
-                              ? getThreeBeys(customRow)
-                              : [];
+                          selectedTournament.format === "3ON3"
+                            ? getThreeBeys(row).length
+                              ? getThreeBeys(row)
+                              : customRow
+                                ? getThreeBeys(customRow)
+                                : []
+                            : [];
 
                         return (
                           <div className="result-card" key={String(row.id ?? index)}>
@@ -911,7 +1166,7 @@ export default function Home() {
                                 </span>
                               )}
 
-                              {threeBeys.length > 0 ? (
+                              {selectedTournament.format === "3ON3" && threeBeys.length > 0 ? (
                                 <div className="custom-box">
                                   <div className="custom-label">3 BEYS</div>
                                   <div className="three-bey-grid">
@@ -941,7 +1196,7 @@ export default function Home() {
                   )}
                 </div>
 
-                {teamRows.length > 0 && (
+                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
                   <div className="detail-block">
                     <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
@@ -1050,20 +1305,58 @@ export default function Home() {
 
                 <div className="account-block">
                   <label htmlFor="player-link">PLAYER</label>
-                  <select
-                    id="player-link"
-                    value={selectedPlayerId}
-                    onChange={(event) =>
-                      setSelectedPlayerId(event.target.value)
-                    }
-                  >
-                    <option value="">SELECT PLAYER</option>
-                    {players.map((player) => (
-                      <option value={player.id} key={player.id}>
-                        {player.nickname || player.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="player-picker">
+                    <button
+                      type="button"
+                      id="player-link"
+                      className="player-picker-display"
+                      onClick={() => setPlayerPickerOpen((open) => !open)}
+                      aria-haspopup="listbox"
+                      aria-expanded={playerPickerOpen}
+                    >
+                      <span className={selectedPlayerId ? "selected-player-name" : "selected-player-placeholder"}>
+                        {selectedPlayerId
+                          ? (players.find((p) => String(p.id) === String(selectedPlayerId))?.nickname ||
+                             players.find((p) => String(p.id) === String(selectedPlayerId))?.name ||
+                             "SELECT PLAYER")
+                          : "SELECT PLAYER"}
+                      </span>
+                      <span className="player-picker-arrow">⌄</span>
+                    </button>
+                    {playerPickerOpen && (
+                      <div className="player-picker-menu" role="listbox" aria-labelledby="player-link">
+                        <button
+                          type="button"
+                          className={`player-picker-option ${!selectedPlayerId ? "active" : ""}`}
+                          onClick={() => {
+                            setSelectedPlayerId("");
+                            setPlayerPickerOpen(false);
+                          }}
+                        >
+                          SELECT PLAYER
+                        </button>
+                        {players.map((player) => {
+                          const playerName = player.nickname || player.name;
+                          const active = String(player.id) === String(selectedPlayerId);
+                          return (
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={active}
+                              className={`player-picker-option ${active ? "active" : ""}`}
+                              key={player.id}
+                              onClick={() => {
+                                setSelectedPlayerId(String(player.id));
+                                setPlayerPickerOpen(false);
+                              }}
+                            >
+                              {playerName}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
 
                   <button
                     className="primary-button full"
@@ -2001,8 +2294,80 @@ export default function Home() {
           letter-spacing: 0.18em;
         }
 
+        .player-picker {
+          position: relative;
+          width: 100%;
+        }
+
+        .player-picker-display {
+          width: 100%;
+          min-height: 50px;
+          box-sizing: border-box;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 14px;
+          border: 1px solid rgba(156, 104, 237, 0.45);
+          outline: none;
+          background: rgba(255, 255, 255, 0.035);
+          color: #a86cff;
+          font-weight: 700;
+        }
+
+
+        .player-picker-menu {
+          position: absolute;
+          z-index: 30;
+          left: 0;
+          right: 0;
+          top: calc(100% + 4px);
+          max-height: 240px;
+          overflow-y: auto;
+          border: 1px solid rgba(168, 108, 255, 0.55);
+          background: #0d0a12;
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+        }
+
+        .player-picker-option {
+          display: block;
+          width: 100%;
+          padding: 13px 14px;
+          border: 0;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+          background: transparent;
+          color: #a86cff;
+          text-align: left;
+          font: inherit;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .player-picker-option:hover,
+        .player-picker-option.active {
+          background: rgba(168, 108, 255, 0.14);
+          color: #c49aff;
+        }
+        .selected-player-name {
+          color: #a86cff;
+        }
+
+        .selected-player-placeholder {
+          color: #77717f;
+        }
+
+        .player-picker-arrow {
+          color: #a86cff;
+          font-size: 18px;
+          line-height: 1;
+        }
+
+        .player-picker:focus-within .player-picker-display {
+          border-color: rgba(168, 108, 255, 0.95);
+          box-shadow: 0 0 0 1px rgba(168, 108, 255, 0.2);
+        }
+
         .account-field input,
-        .account-block select, .account-block select option {
+        .account-block select {
           width: 100%;
           padding: 14px;
           border: 1px solid rgba(255, 255, 255, 0.12);

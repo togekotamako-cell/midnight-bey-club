@@ -96,6 +96,28 @@ async function supabaseFetch(
   });
 }
 
+async function refreshStoredSession(): Promise<Session | null> {
+  if (typeof window === "undefined" || !SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  const raw = window.localStorage.getItem("midnight_session");
+  if (!raw) return null;
+  try {
+    const current = JSON.parse(raw) as Session;
+    if (!current.refresh_token) return null;
+    const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({ refresh_token: current.refresh_token }),
+    });
+    if (!response.ok) return null;
+    const next = (await response.json()) as Session;
+    if (!next?.access_token || !next?.user?.id) return null;
+    window.localStorage.setItem("midnight_session", JSON.stringify(next));
+    return next;
+  } catch {
+    return null;
+  }
+}
+
 function displayDate(value: unknown) {
   if (!value) return "";
   const raw = String(value);
@@ -318,18 +340,25 @@ export default function Home() {
   const [rankingLoading, setRankingLoading] = useState(true);
 
   useEffect(() => {
-    const saved =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("midnight_session")
-        : null;
-
-    if (saved) {
+    let alive = true;
+    (async () => {
+      const saved = typeof window !== "undefined" ? window.localStorage.getItem("midnight_session") : null;
+      if (!saved) return;
       try {
-        setSession(JSON.parse(saved));
+        let current = JSON.parse(saved) as Session;
+        if (!current?.access_token || !current?.user?.id) return;
+        const probe = await supabaseFetch(`/rest/v1/accounts?select=id&id=eq.${encodeURIComponent(current.user.id)}&limit=1`, {}, current.access_token);
+        if (probe.status === 401) {
+          const refreshed = await refreshStoredSession();
+          if (refreshed) current = refreshed;
+          else { window.localStorage.removeItem("midnight_session"); return; }
+        }
+        if (alive) setSession(current);
       } catch {
         window.localStorage.removeItem("midnight_session");
       }
-    }
+    })();
+    return () => { alive = false; };
   }, []);
 
   const loadAccountProfile = async (accessToken: string, userId: string) => {
@@ -389,35 +418,22 @@ export default function Home() {
           }
         }
 
-        const [rankingResponse, totalResponse, playerResponse] =
-          await Promise.all([
-            supabaseFetch(
-              "/rest/v1/player_rankings?select=*&order=points.desc"
-            ),
-            supabaseFetch(
-              "/rest/v1/player_total_points?select=*"
-            ),
-            supabaseFetch(
-              "/rest/v1/players?select=*&order=name.asc"
-            ),
-          ]);
-
-        const rankingRows = rankingResponse.ok
-          ? await rankingResponse.json()
-          : [];
-        const totalRows = totalResponse.ok ? await totalResponse.json() : [];
-        const playerRows = playerResponse.ok
-          ? await playerResponse.json()
-          : [];
-
-        const merged = mergePlayers(
-          Array.isArray(rankingRows) ? rankingRows : [],
-          Array.isArray(totalRows) && totalRows.length
-            ? totalRows
-            : Array.isArray(playerRows)
-              ? playerRows
-              : []
+        const playerResponse = await supabaseFetch(
+          "/rest/v1/players?select=id,name,nickname,points,wins,tournaments,is_active&order=points.desc,name.asc"
         );
+        const playerRows = playerResponse.ok ? await playerResponse.json() : [];
+        const merged = Array.isArray(playerRows)
+          ? playerRows.map((row: ResultRow, index: number) => ({
+              id: String(row.id),
+              name: String(row.name ?? "PLAYER"),
+              nickname: row.nickname == null ? null : String(row.nickname),
+              rank: index + 1,
+              points: Number(row.points ?? 0),
+              wins: Number(row.wins ?? 0),
+              tournaments: Number(row.tournaments ?? 0),
+            })).sort((a, b) => b.points - a.points || a.name.localeCompare(b.name))
+              .map((player, index) => ({ ...player, rank: index + 1 }))
+          : [];
 
         if (merged.length) {
           setPlayers(merged);
@@ -978,32 +994,24 @@ export default function Home() {
         ) : (
           <>
             <div className="ranking-table">
-              <div className="ranking-head">
+              <div className="ranking-head simple">
                 <span>RANK</span>
                 <span>PLAYER</span>
-                <span>WINS</span>
-                <span>EVENTS</span>
                 <span>PTS</span>
               </div>
 
               {players.map((player) => (
-                <div className="ranking-row" key={player.id}>
-                  <span className="rank">
-                    {String(player.rank).padStart(2, "0")}
-                  </span>
-                  <span className="player-name">
-                    {player.nickname || player.name}
-                  </span>
-                  <span>{player.wins}</span>
-                  <span>{player.tournaments}</span>
-                  <strong>{player.points}</strong>
+                <div className="ranking-row simple" key={player.id}>
+                  <span className="rank">{String(player.rank).padStart(2, "0")}</span>
+                  <span className="player-name">{player.nickname || player.name}</span>
+                  <strong>{player.points} PT</strong>
                 </div>
               ))}
             </div>
 
             <div className="ranking-note">
               <span>CUMULATIVE POINTS</span>
-              <span>1ST 3PT / 2ND 2PT / 3RD 1PT</span>
+              <span>1ST 3PT / 2ND 2PT / 3RD 1PT · TEAM 2PT / 1PT</span>
             </div>
           </>
         )}
@@ -1097,7 +1105,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / {selectedTournament.format}
+              TOURNAMENT / 3ON3 + TEAM BATTLE
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -1165,7 +1173,7 @@ export default function Home() {
                                 </span>
                               )}
 
-                              {selectedTournament.format === "3ON3" && threeBeys.length > 0 ? (
+                              {threeBeys.length > 0 ? (
                                 <div className="custom-box">
                                   <div className="custom-label">3 BEYS</div>
                                   <div className="three-bey-grid">
@@ -1195,7 +1203,7 @@ export default function Home() {
                   )}
                 </div>
 
-                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
+                {teamRows.length > 0 && (
                   <div className="detail-block">
                     <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
@@ -1845,6 +1853,15 @@ export default function Home() {
           display: grid;
           grid-template-columns: 100px 1fr 120px 120px 100px;
           align-items: center;
+        }
+
+        .ranking-head.simple,
+        .ranking-row.simple {
+          grid-template-columns: 100px 1fr 140px;
+        }
+
+        .ranking-row.simple strong {
+          text-align: right;
         }
 
         .ranking-head {

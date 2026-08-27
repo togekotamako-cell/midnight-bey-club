@@ -311,7 +311,6 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
-  const [accountPlayerName, setAccountPlayerName] = useState("");
   const [accountIsAdmin, setAccountIsAdmin] = useState(false);
   const [accountMessage, setAccountMessage] = useState("");
   const [accountLoading, setAccountLoading] = useState(false);
@@ -632,7 +631,6 @@ export default function Home() {
         }
 
         setSelectedPlayerId(String(createdPlayer.id));
-        setAccountPlayerName(String(createdPlayer.nickname || createdPlayer.name || name));
       }
 
       setAccountMessage("ACCOUNT CREATED. PLAYER PROFILE CREATED.");
@@ -744,41 +742,6 @@ export default function Home() {
       setAccountLoading(false);
     }
   };
-
-  const loadOwnPlayer = async (accessToken: string, userId: string) => {
-    try {
-      const accountResponse = await supabaseFetch(
-        `/rest/v1/accounts?select=player_id,display_name&id=eq.${encodeURIComponent(userId)}&limit=1`,
-        {},
-        accessToken
-      );
-      if (!accountResponse.ok) return;
-      const accounts = await accountResponse.json();
-      setAccountIsAdmin(accounts?.[0]?.is_admin === true);
-      const playerId = accounts?.[0]?.player_id ? String(accounts[0].player_id) : "";
-      if (playerId) {
-        setSelectedPlayerId(playerId);
-        const playerResponse = await supabaseFetch(
-          `/rest/v1/players?select=id,name,nickname&id=eq.${encodeURIComponent(playerId)}&limit=1`,
-          {},
-          accessToken
-        );
-        if (playerResponse.ok) {
-          const rows = await playerResponse.json();
-          const player = Array.isArray(rows) ? rows[0] : null;
-          if (player) setAccountPlayerName(String(player.nickname || player.name || ""));
-        }
-      }
-    } catch {
-      // Account display is non-blocking.
-    }
-  };
-
-  useEffect(() => {
-    if (session?.access_token && session.user?.id) {
-      void loadOwnPlayer(session.access_token, session.user.id);
-    }
-  }, [session?.access_token, session?.user?.id]);
 
   const logout = () => {
     setSession(null);
@@ -1018,6 +981,8 @@ export default function Home() {
               <div className="ranking-head">
                 <span>RANK</span>
                 <span>PLAYER</span>
+                <span>WINS</span>
+                <span>EVENTS</span>
                 <span>PTS</span>
               </div>
 
@@ -1029,7 +994,9 @@ export default function Home() {
                   <span className="player-name">
                     {player.nickname || player.name}
                   </span>
-                  <strong>{player.points} PT</strong>
+                  <span>{player.wins}</span>
+                  <span>{player.tournaments}</span>
+                  <strong>{player.points}</strong>
                 </div>
               ))}
             </div>
@@ -1157,7 +1124,7 @@ export default function Home() {
                 </div>
 
                 <div className="detail-block">
-                  <div className="detail-title">3ON3 RESULTS</div>
+                  <div className="detail-title">RESULTS</div>
 
                   {resultRowsSorted.length === 0 ? (
                     <div className="detail-no-data">NO DATA</div>
@@ -1173,11 +1140,13 @@ export default function Home() {
                           getCustomData(row) ??
                           (customRow ? getCustomData(customRow) : null);
                         const threeBeys =
-                          getThreeBeys(row).length
-                            ? getThreeBeys(row)
-                            : customRow
-                              ? getThreeBeys(customRow)
-                              : [];
+                          selectedTournament.format === "3ON3"
+                            ? getThreeBeys(row).length
+                              ? getThreeBeys(row)
+                              : customRow
+                                ? getThreeBeys(customRow)
+                                : []
+                            : [];
 
                         return (
                           <div className="result-card" key={String(row.id ?? index)}>
@@ -1196,7 +1165,7 @@ export default function Home() {
                                 </span>
                               )}
 
-                              {threeBeys.length > 0 ? (
+                              {selectedTournament.format === "3ON3" && threeBeys.length > 0 ? (
                                 <div className="custom-box">
                                   <div className="custom-label">3 BEYS</div>
                                   <div className="three-bey-grid">
@@ -1226,11 +1195,9 @@ export default function Home() {
                   )}
                 </div>
 
-                <div className="detail-block">
-                  <div className="detail-title">TEAM RESULTS</div>
-                  {teamRows.length === 0 ? (
-                    <div className="detail-no-data">NO TEAM RESULT</div>
-                  ) : (
+                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
+                  <div className="detail-block">
+                    <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
                       {teamRows.map((team, index) => {
                         const teamId = String(team.id ?? "");
@@ -1280,8 +1247,8 @@ export default function Home() {
                         );
                       })}
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
 
                 {resultRowsSorted.length === 0 &&
                   customRows.length > 0 && (
@@ -1336,10 +1303,30 @@ export default function Home() {
                 </p>
 
                 <div className="account-block">
-                  <label>PLAYER</label>
-                  <div className="account-player">
-                    {accountPlayerName || "PLAYER PROFILE NOT FOUND"}
-                  </div>
+                  <label htmlFor="player-link">PLAYER</label>
+                  <select
+                    id="player-link"
+                    value={selectedPlayerId}
+                    onChange={(event) =>
+                      setSelectedPlayerId(event.target.value)
+                    }
+                  >
+                    <option value="">SELECT PLAYER</option>
+                    {players.map((player) => (
+                      <option value={player.id} key={player.id}>
+                        {player.nickname || player.name}
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    className="primary-button full"
+                    onClick={linkPlayer}
+                    type="button"
+                    disabled={accountLoading || players.length === 0}
+                  >
+                    LINK PLAYER
+                  </button>
                 </div>
 
                 <button
@@ -1856,7 +1843,7 @@ export default function Home() {
         .ranking-head,
         .ranking-row {
           display: grid;
-          grid-template-columns: 100px 1fr 120px;
+          grid-template-columns: 100px 1fr 120px 120px 100px;
           align-items: center;
         }
 
@@ -2269,8 +2256,7 @@ export default function Home() {
         }
 
         .account-field input,
-        .account-block select,
-        .account-player {
+        .account-block select {
           width: 100%;
           padding: 14px;
           border: 1px solid rgba(255, 255, 255, 0.12);
@@ -2280,8 +2266,7 @@ export default function Home() {
         }
 
         .account-field input:focus,
-        .account-block select:focus,
-        .account-player:focus {
+        .account-block select:focus {
           border-color: rgba(156, 104, 237, 0.7);
         }
 
@@ -2366,7 +2351,7 @@ export default function Home() {
 
           .ranking-head,
           .ranking-row {
-            grid-template-columns: 55px 1fr 80px;
+            grid-template-columns: 55px 1fr 55px 55px 55px;
           }
 
           .ranking-head {

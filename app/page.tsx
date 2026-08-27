@@ -310,6 +310,22 @@ export default function Home() {
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
+  // Derived tournament-detail data used by the modal.
+  // Keep this here so TypeScript can resolve the names used by the JSX.
+  const resultRowsSorted = useMemo(
+    () => [...resultRows].sort((a, b) => (getResultRank(a) ?? 999) - (getResultRank(b) ?? 999)),
+    [resultRows]
+  );
+
+  const customByPlayer = useMemo(() => {
+    const map = new Map<string, ResultRow>();
+    for (const row of customRows) {
+      const playerId = String(row.player_id ?? row.playerId ?? "");
+      if (playerId && !map.has(playerId)) map.set(playerId, row);
+    }
+    return map;
+  }, [customRows]);
+
   const rpc = async (name: string, body: Record<string, unknown>) => {
     const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
       method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json" },

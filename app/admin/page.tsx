@@ -2,90 +2,368 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Tournament = { id:string; name:string; date:string; location:string; status:string; format:string };
-type Player = { id:string; name:string; nickname:string; points:number; wins:number; tournaments:number; is_active:boolean };
-type Result = { id:string; rank:number; player_id:string; bey1:string; bey2:string; bey3:string };
-type Team = { id:string; rank:1|2; name:string; members:string[] };
-type Custom = { id:string; label:string; value:string };
-type Session = { access_token:string; refresh_token?:string; expires_at?:number; user?:{id:string;email?:string} };
+type Format = "3ON3" | "TEAM";
+type Status = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
+type Player = { id: string; name: string; nickname?: string | null; points?: number; manual_points?: number; wins?: number; tournaments?: number; is_active?: boolean };
+type Tournament = { id: string; name: string; date: string; location: string; status: Status; format: Format };
+type Result = { id?: string; rank: number; player_id: string; player_name?: string; bey1: string; bey2: string; bey3: string; points: number };
+type Team = { id?: string; name: string; rank: 1 | 2; members: string[] };
+type Custom = { id?: string; label: string; value: string };
+type Session = { access_token: string; user?: { id: string; email?: string } };
 
-const URL=process.env.NEXT_PUBLIC_SUPABASE_URL??"";
-const KEY=process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY??"";
-const headers=(token?:string)=>({apikey:KEY,Authorization:`Bearer ${token||KEY}`,"Content-Type":"application/json",Accept:"application/json"});
-const enc=(s:string)=>encodeURIComponent(s);
-const uid=()=>crypto.randomUUID();
+const URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+const KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 
-async function sb(path:string, init:RequestInit={}, token?:string){
-  if(!URL||!KEY) throw new Error("SUPABASE ENVIRONMENT VARIABLES ARE MISSING.");
-  return fetch(`${URL}${path}`,{...init,headers:{...headers(token),...(init.headers||{})},cache:"no-store"});
+function hdr(token?: string) { return { apikey: KEY, Authorization: `Bearer ${token || KEY}`, "Content-Type": "application/json", Accept: "application/json" }; }
+async function api(path: string, init: RequestInit = {}, token?: string) {
+  if (!URL || !KEY) throw new Error("SUPABASE ENVIRONMENT VARIABLES ARE MISSING.");
+  return fetch(`${URL}${path}`, { ...init, headers: { ...hdr(token), ...(init.headers || {}) }, cache: "no-store" });
+}
+function enc(v: string) { return encodeURIComponent(v); }
+function dateOut(v: unknown) { const s = String(v ?? ""); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.replaceAll("-", ".") : s; }
+function dateIn(v: string) { return v.replaceAll(".", "-"); }
+function uid() { return crypto.randomUUID(); }
+function errText(e: unknown) { return e instanceof Error ? e.message : String(e); }
+
+async function refreshSession(): Promise<Session | null> {
+  if (typeof window === "undefined") return null;
+  const raw = localStorage.getItem("midnight_session");
+  if (!raw) return null;
+  try {
+    const current = JSON.parse(raw) as Session;
+    const refresh_token = (current as Session & { refresh_token?: string }).refresh_token;
+    if (!refresh_token) return null;
+    const response = await fetch(`${URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: hdr(),
+      body: JSON.stringify({ refresh_token }),
+    });
+    if (!response.ok) return null;
+    const next = await response.json() as Session;
+    if (!next?.access_token || !next?.user?.id) return null;
+    localStorage.setItem("midnight_session", JSON.stringify(next));
+    return next;
+  } catch {
+    return null;
+  }
 }
 
-function blankResults():Result[]{return [1,2,3].map(rank=>({id:uid(),rank,player_id:"",bey1:"",bey2:"",bey3:""}));}
-function blankTeams():Team[]{return [{id:uid(),rank:1,name:"TEAM 1",members:["","",""]},{id:uid(),rank:2,name:"TEAM 2",members:["","",""]}];}
+export default function AdminPage() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authorized, setAuthorized] = useState<boolean | null>(null);
+  const [tab, setTab] = useState<"tournaments" | "players">("tournaments");
+  const [tournaments, setTournaments] = useState<Tournament[]>([]);
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [results, setResults] = useState<Result[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [customs, setCustoms] = useState<Custom[]>([]);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [newPlayerName, setNewPlayerName] = useState("");
+  const [newPlayerNickname, setNewPlayerNickname] = useState("");
+  const [newPlayerPoints, setNewPlayerPoints] = useState("0");
 
-export default function AdminPage(){
- const [session,setSession]=useState<Session|null>(null),[authorized,setAuthorized]=useState<boolean|null>(null);
- const [tab,setTab]=useState<"tournaments"|"players">("tournaments"),[tournaments,setTournaments]=useState<Tournament[]>([]),[players,setPlayers]=useState<Player[]>([]);
- const [selectedId,setSelectedId]=useState<string|null>(null),[results,setResults]=useState<Result[]>([]),[teams,setTeams]=useState<Team[]>([]),[customs,setCustoms]=useState<Custom[]>([]);
- const [newName,setNewName]=useState(""),[newNick,setNewNick]=useState(""),[message,setMessage]=useState(""),[saving,setSaving]=useState(false);
- const selected=tournaments.find(x=>x.id===selectedId)||null;
+  const selected = tournaments.find(t => t.id === selectedId) ?? null;
 
- const load=async(s:Session)=>{
-   const ar=await sb(`/rest/v1/accounts?select=is_admin&id=eq.${enc(s.user!.id)}&limit=1`,{},s.access_token);
-   if(!ar.ok){setAuthorized(false);throw new Error(await ar.text())}
-   const a=await ar.json(); if(a?.[0]?.is_admin!==true){setAuthorized(false);return;} setAuthorized(true);
-   const [tr,pr]=await Promise.all([sb('/rest/v1/tournaments?select=*&order=tournament_date.asc',{},s.access_token),sb('/rest/v1/players?select=*&order=points.desc,name.asc',{},s.access_token)]);
-   if(tr.ok){const rows=await tr.json();setTournaments((rows||[]).map((r:any)=>({id:String(r.id),name:String(r.name||""),date:String(r.tournament_date||r.date||"").replaceAll("-","."),location:String(r.location||""),status:String(r.status||"UPCOMING"),format:String(r.format||"3ON3").toUpperCase().includes("TEAM")?"TEAM":"3ON3"})))}
-   if(pr.ok){const rows=await pr.json();setPlayers((rows||[]).map((r:any)=>({id:String(r.id),name:String(r.name||""),nickname:String(r.nickname||""),points:Number(r.points||0),wins:Number(r.wins||0),tournaments:Number(r.tournaments||0),is_active:r.is_active!==false})))}
- };
- useEffect(()=>{try{const x=localStorage.getItem("midnight_session");if(!x){setAuthorized(false);return}const s=JSON.parse(x);setSession(s);load(s).catch(e=>setMessage(e.message))}catch{setAuthorized(false)}},[]);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const raw = localStorage.getItem("midnight_session");
+        if (!raw) {
+          if (alive) setAuthorized(false);
+          return;
+        }
 
- const open=async(id:string)=>{
-  setSelectedId(id);setMessage("");
-  const [rr,tr,cr]=await Promise.all([sb(`/rest/v1/tournament_results?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`,{},session?.access_token),sb(`/rest/v1/teams?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`,{},session?.access_token),sb(`/rest/v1/custom_registrations?select=*&tournament_id=eq.${enc(id)}`,{},session?.access_token)]);
-  const r=rr.ok?await rr.json():[], t=tr.ok?await tr.json():[], c=cr.ok?await cr.json():[];
-  const rs:Array<Result>=Array.isArray(r)?r.map((x:any)=>({id:String(x.id||uid()),rank:Number(x.rank||x.place||x.placement||1),player_id:String(x.player_id||""),bey1:String(x.bey1||x.bey_1||""),bey2:String(x.bey2||x.bey_2||""),bey3:String(x.bey3||x.bey_3||"")})):[];
-  const fixed=blankResults().map(b=>rs.find(x=>x.rank===b.rank)||b); setResults(fixed);
-  let ts:Array<Team>=Array.isArray(t)?t.map((x:any)=>({id:String(x.id||uid()),rank:Number(x.rank||x.place||1)===2?2:1,name:String(x.name||x.team_name||"TEAM"),members:[]})):[];
-  if(ts.length){const ids=ts.map(x=>x.id);const mr=await sb(`/rest/v1/team_members?select=*&team_id=in.(${ids.map(enc).join(",")})`,{},session?.access_token);const m=mr.ok?await mr.json():[];ts=ts.map(x=>({...x,members:(m||[]).filter((z:any)=>String(z.team_id)===x.id).map((z:any)=>String(z.player_id||""))}));}
-  ts=blankTeams().map(b=>ts.find(x=>x.rank===b.rank)||b).map(x=>({...x,members:[x.members[0]||"",x.members[1]||"",x.members[2]||""]})); setTeams(ts);
-  setCustoms(Array.isArray(c)?c.map((x:any)=>({id:String(x.id||uid()),label:String(x.label||x.name||x.title||"CUSTOM"),value:typeof x.value==="string"?x.value:JSON.stringify(x.custom_data??x.custom??x.value??"")})):[]);
- };
+        let current = JSON.parse(raw) as Session;
+        if (!current?.access_token || !current.user?.id) {
+          if (alive) setAuthorized(false);
+          return;
+        }
 
- const newTournament=()=>{const id=uid();setTournaments(v=>[...v,{id,name:"NEW MIDNIGHT BEY CLUB",date:"",location:"",status:"UPCOMING",format:"3ON3"}]);setSelectedId(id);setResults(blankResults());setTeams(blankTeams());setCustoms([])};
- const updateT=(f:keyof Tournament,v:string)=>setTournaments(xs=>xs.map(x=>x.id===selectedId?{...x,[f]:v}:x));
- const addPlayer=async()=>{if(!newName.trim()||!session)return;setSaving(true);try{const r=await sb('/rest/v1/players',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({id:uid(),name:newName.trim(),nickname:newNick.trim()||null,points:0,wins:0,tournaments:0,is_active:true})},session.access_token);if(!r.ok)throw new Error(await r.text());setNewName("");setNewNick("");await load(session);setMessage("PLAYER ADDED.")}catch(e:any){setMessage(e.message)}finally{setSaving(false)}};
- const sorted=useMemo(()=>[...players].sort((a,b)=>b.points-a.points||a.name.localeCompare(b.name)),[players]);
- const updateP=(id:string,f:keyof Player,v:string)=>setPlayers(xs=>xs.map(p=>p.id===id?{...p,[f]:f==="name"||f==="nickname"?v:Number(v)}:p));
+        let response = await api(
+          `/rest/v1/accounts?select=is_admin&id=eq.${enc(current.user.id)}&limit=1`,
+          {},
+          current.access_token
+        );
 
- const save=async()=>{if(!session||!selected)return;setSaving(true);setMessage("SAVING...");try{
-  const t=await sb(`/rest/v1/tournaments?id=eq.${enc(selected.id)}`,{method:'PATCH',headers:{Prefer:'return=minimal'},body:JSON.stringify({name:selected.name,tournament_date:selected.date.replaceAll(".","-").slice(0,10),location:selected.location,status:selected.status,format:selected.format})},session.access_token);if(!t.ok)throw new Error(await t.text());
-  const oldR=await sb(`/rest/v1/tournament_results?tournament_id=eq.${enc(selected.id)}&select=id`,{},session.access_token);if(oldR.ok){for(const x of await oldR.json())await sb(`/rest/v1/tournament_results?id=eq.${enc(String(x.id))}`,{method:'DELETE'},session.access_token)}
-  for(const r of results){if(!r.player_id)continue;const x=await sb('/rest/v1/tournament_results',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({id:uid(),tournament_id:selected.id,player_id:r.player_id,rank:r.rank,place:r.rank,placement:r.rank,bey1:r.bey1,bey2:r.bey2,bey3:r.bey3,points:r.rank===1?3:r.rank===2?2:1})},session.access_token);if(!x.ok)throw new Error(await x.text())}
-  const oldT=await sb(`/rest/v1/teams?tournament_id=eq.${enc(selected.id)}&select=id`,{},session.access_token);if(oldT.ok){for(const x of await oldT.json()){await sb(`/rest/v1/team_members?team_id=eq.${enc(String(x.id))}`,{method:'DELETE'},session.access_token);await sb(`/rest/v1/teams?id=eq.${enc(String(x.id))}`,{method:'DELETE'},session.access_token)}}
-  for(const team of teams){const tid=uid();const x=await sb('/rest/v1/teams',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({id:tid,tournament_id:selected.id,name:team.name,team_name:team.name,rank:team.rank,place:team.rank,points:team.rank===1?2:1})},session.access_token);if(!x.ok)throw new Error(await x.text());for(const pid of team.members.filter(Boolean)){const m=await sb('/rest/v1/team_members',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({id:uid(),team_id:tid,player_id:pid})},session.access_token);if(!m.ok)throw new Error(await m.text())}}
-  const oldC=await sb(`/rest/v1/custom_registrations?tournament_id=eq.${enc(selected.id)}&select=id`,{},session.access_token);if(oldC.ok){for(const x of await oldC.json())await sb(`/rest/v1/custom_registrations?id=eq.${enc(String(x.id))}`,{method:'DELETE'},session.access_token)}
-  for(const c of customs.filter(x=>x.label.trim()||x.value.trim())){const x=await sb('/rest/v1/custom_registrations',{method:'POST',headers:{Prefer:'return=minimal'},body:JSON.stringify({id:uid(),tournament_id:selected.id,label:c.label,name:c.label,value:c.value,custom:c.value,custom_data:c.value})},session.access_token);if(!x.ok)throw new Error(await x.text())}
-  await load(session);await open(selected.id);setMessage("TOURNAMENT SAVED.");
- }catch(e:any){setMessage(`SAVE FAILED: ${e.message}`)}finally{setSaving(false)}};
+        if (response.status === 401) {
+          const refreshed = await refreshSession();
+          if (!refreshed) {
+            localStorage.removeItem("midnight_session");
+            if (alive) setAuthorized(false);
+            return;
+          }
+          current = refreshed;
+          response = await api(
+            `/rest/v1/accounts?select=is_admin&id=eq.${enc(current.user.id)}&limit=1`,
+            {},
+            current.access_token
+          );
+        }
 
- const savePlayers=async()=>{if(!session)return;setSaving(true);try{for(const p of players){const r=await sb(`/rest/v1/players?id=eq.${enc(p.id)}`,{method:'PATCH',headers:{Prefer:'return=minimal'},body:JSON.stringify({name:p.name,nickname:p.nickname||null,points:Number(p.points)||0,wins:Number(p.wins)||0,tournaments:Number(p.tournaments)||0})},session.access_token);if(!r.ok)throw new Error(await r.text())}await load(session);setMessage("PLAYERS / POINTS SAVED.")}catch(e:any){setMessage(`SAVE FAILED: ${e.message}`)}finally{setSaving(false)}};
+        if (!response.ok) throw new Error(await response.text());
 
- if(authorized===null)return <main className="admin"><div className="gate">CHECKING ADMIN ACCESS...</div><style jsx global>{css}</style></main>;
- if(!authorized)return <main className="admin"><div className="gate"><h1>ADMIN</h1><p>ADMIN ACCESS REQUIRED.</p><a href="/">BACK TO SITE ↗</a></div><style jsx global>{css}</style></main>;
- return <main className="admin">
-  <header><div><small>MIDNIGHT BEY CLUB</small><h1>ADMIN</h1><p>TOURNAMENT / PLAYER MANAGEMENT</p></div><a href="/">BACK TO SITE ↗</a></header>
-  <nav><button className={tab==='tournaments'?'active':''} onClick={()=>setTab('tournaments')}>TOURNAMENTS</button><button className={tab==='players'?'active':''} onClick={()=>setTab('players')}>PLAYERS / RANKING</button><button onClick={newTournament}>+ NEW TOURNAMENT</button></nav>
-  {tab==='players'?<section className="panel"><div className="title"><small>THE NUMBERS</small><h2>PLAYER RANKING</h2></div><div className="add"><input placeholder="PLAYER NAME" value={newName} onChange={e=>setNewName(e.target.value)}/><input placeholder="NICKNAME" value={newNick} onChange={e=>setNewNick(e.target.value)}/><button onClick={addPlayer}>+ ADD PLAYER</button></div><div className="players">{sorted.map((p,i)=><div className="player" key={p.id}><b>{String(i+1).padStart(2,'0')}</b><label>PLAYER<input value={p.name} onChange={e=>updateP(p.id,'name',e.target.value)}/></label><label>NICKNAME<input value={p.nickname} onChange={e=>updateP(p.id,'nickname',e.target.value)}/></label><label>POINTS<input type="number" value={p.points} onChange={e=>updateP(p.id,'points',e.target.value)}/></label><label>WINS<input type="number" value={p.wins} onChange={e=>updateP(p.id,'wins',e.target.value)}/></label><label>EVENTS<input type="number" value={p.tournaments} onChange={e=>updateP(p.id,'tournaments',e.target.value)}/></label></div>)}</div><button className="save" onClick={savePlayers} disabled={saving}>{saving?'SAVING...':'SAVE PLAYERS / POINTS'}</button><p className="msg">{message}</p></section>
-  :<div className="workspace"><aside>{tournaments.map(t=><button className={selectedId===t.id?'event active':'event'} key={t.id} onClick={()=>open(t.id)}><small>{t.status} · {t.format}</small><strong>{t.name||'NO DATA'}</strong><span>{t.date} · {t.location}</span></button>)}</aside><section className="panel editor">{!selected?<div className="gate">SELECT A TOURNAMENT OR CREATE ONE</div>:<>
-    <div className="title"><small>TOURNAMENT EDITOR</small><h2>{selected.name}</h2></div><div className="grid"><label>NAME<input value={selected.name} onChange={e=>updateT('name',e.target.value)}/></label><label>DATE<input type="date" value={selected.date.replaceAll('.','-')} onChange={e=>updateT('date',e.target.value.replaceAll('-','.'))}/></label><label>LOCATION<input value={selected.location} onChange={e=>updateT('location',e.target.value)}/></label><label>STATUS<select value={selected.status} onChange={e=>updateT('status',e.target.value)}><option>ENTRY OPEN</option><option>UPCOMING</option><option>FINISHED</option></select></label></div>
-    <section><div className="sect"><small>RESULT 01</small><h3>3ON3 TOP 3</h3><p>INDIVIDUAL · 1ST 3PT / 2ND 2PT / 3RD 1PT</p></div>{results.map(r=><div className="row" key={r.id}><b>{r.rank}位<br/><small>{r.rank===1?3:r.rank===2?2:1} PT</small></b><select value={r.player_id} onChange={e=>setResults(v=>v.map(x=>x.id===r.id?{...x,player_id:e.target.value}:x))}><option value="">SELECT PLAYER</option>{players.map(p=><option key={p.id} value={p.id}>{p.nickname||p.name}</option>)}</select><input placeholder="BEY 1" value={r.bey1} onChange={e=>setResults(v=>v.map(x=>x.id===r.id?{...x,bey1:e.target.value}:x))}/><input placeholder="BEY 2" value={r.bey2} onChange={e=>setResults(v=>v.map(x=>x.id===r.id?{...x,bey2:e.target.value}:x))}/><input placeholder="BEY 3" value={r.bey3} onChange={e=>setResults(v=>v.map(x=>x.id===r.id?{...x,bey3:e.target.value}:x))}/></div>)}</section>
-    <section><div className="sect"><small>RESULT 02</small><h3>TEAM BATTLE</h3><p>1ST = 2PT EACH · 2ND = 1PT EACH · 3 MEMBERS</p></div>{teams.map(t=><div className="team" key={t.id}><div><b>{t.rank===1?'1ST PLACE':'2ND PLACE'}</b><input value={t.name} onChange={e=>setTeams(v=>v.map(x=>x.id===t.id?{...x,name:e.target.value}:x))}/></div><div className="members">{t.members.map((m,j)=><select key={j} value={m} onChange={e=>setTeams(v=>v.map(x=>x.id===t.id?{...x,members:x.members.map((z,k)=>k===j?e.target.value:z)}:x))}><option value="">MEMBER {j+1}</option>{players.map(p=><option key={p.id} value={p.id}>{p.nickname||p.name}</option>)}</select>)}</div></div>)}</section>
-    <section><div className="sect"><small>EXTRA DATA</small><h3>CUSTOM</h3></div>{customs.map(c=><div className="custom" key={c.id}><input value={c.label} onChange={e=>setCustoms(v=>v.map(x=>x.id===c.id?{...x,label:e.target.value}:x))}/><input value={c.value} onChange={e=>setCustoms(v=>v.map(x=>x.id===c.id?{...x,value:e.target.value}:x))}/><button onClick={()=>setCustoms(v=>v.filter(x=>x.id!==c.id))}>×</button></div>)}<button className="addBtn" onClick={()=>setCustoms(v=>[...v,{id:uid(),label:'CUSTOM',value:''}])}>+ ADD CUSTOM</button></section>
-    <div className="bottom"><span>{message}</span><button className="save" onClick={save} disabled={saving}>{saving?'SAVING...':'SAVE TO DATABASE'}</button></div>
-  </>}</section></div>}
-  <style jsx global>{css}</style>
- </main>
+        const rows = await response.json();
+        if (!Array.isArray(rows) || rows[0]?.is_admin !== true) {
+          if (alive) {
+            setAuthorized(false);
+            setMessage("ADMIN ACCESS REQUIRED.");
+          }
+          return;
+        }
+
+        if (alive) {
+          setSession(current);
+          setAuthorized(true);
+        }
+      } catch (e) {
+        if (alive) {
+          setAuthorized(false);
+          setMessage(errText(e));
+        }
+      }
+    })();
+
+    return () => { alive = false; };
+  }, []);
+
+  const loadAll = async () => {
+    if (!session?.access_token || !session.user?.id) return;
+    setMessage("LOADING...");
+    const a = await api(`/rest/v1/accounts?select=is_admin,player_id,display_name&id=eq.${enc(session.user.id)}&limit=1`, {}, session.access_token);
+    if (!a.ok) throw new Error(await a.text());
+    const accounts = await a.json();
+    if (!accounts?.[0]?.is_admin) { setAuthorized(false); setMessage("ADMIN ACCESS REQUIRED."); return; }
+    setAuthorized(true);
+    const [tr, pr] = await Promise.all([
+      api("/rest/v1/tournaments?select=*&order=tournament_date.asc", {}, session.access_token),
+      api("/rest/v1/players?select=id,name,nickname,points,manual_points,wins,tournaments,is_active&order=name.asc", {}, session.access_token),
+    ]);
+    if (tr.ok) {
+      const rows = await tr.json();
+      setTournaments(Array.isArray(rows) ? rows.map((r: any) => ({ id:String(r.id), name:String(r.name??""), date:dateOut(r.tournament_date??r.date), location:String(r.location??""), status:(String(r.status??"UPCOMING") as Status), format:(String(r.format??r.tournament_format??r.tournament_type??"3ON3").toUpperCase().includes("TEAM")?"TEAM":"3ON3") })) : []);
+    }
+    if (pr.ok) {
+      const rows = await pr.json();
+      setPlayers(Array.isArray(rows) ? rows.map((r:any)=>({ id:String(r.id), name:String(r.name??"PLAYER"), nickname:r.nickname==null?null:String(r.nickname), points:Number(r.points??0), manual_points:Number(r.manual_points??0), wins:Number(r.wins??0), tournaments:Number(r.tournaments??0), is_active:r.is_active!==false })) : []);
+    }
+    setMessage("");
+  };
+
+  useEffect(() => { if (session) loadAll().catch(e => { setAuthorized(false); setMessage(errText(e)); }); }, [session]);
+
+  const openTournament = async (id: string) => {
+    setSelectedId(id); setLoadingDetail(true); setMessage("");
+    try {
+      const [rr, cr, tr] = await Promise.all([
+        api(`/rest/v1/tournament_results?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`, {}, session?.access_token),
+        api(`/rest/v1/custom_registrations?select=*&tournament_id=eq.${enc(id)}`, {}, session?.access_token),
+        api(`/rest/v1/teams?select=*&tournament_id=eq.${enc(id)}`, {}, session?.access_token),
+      ]);
+      const rrows = rr.ok ? await rr.json() : [];
+      const crows = cr.ok ? await cr.json() : [];
+      const trows = tr.ok ? await tr.json() : [];
+      // Always keep exactly three 3ON3 result slots. Existing data is preserved;
+      // missing places are created as empty editable rows instead of disappearing.
+      const loadedResults = Array.isArray(rrows) ? rrows.map((r:any)=>({
+        id:r.id,
+        rank:Number(r.rank??r.place??r.placement??1),
+        player_id:String(r.player_id??""),
+        player_name:r.player_name,
+        bey1:String(r.bey1??r.bey_1??""),
+        bey2:String(r.bey2??r.bey_2??""),
+        bey3:String(r.bey3??r.bey_3??""),
+        points:Number(r.points??(Number(r.rank)===1?3:Number(r.rank)===2?2:1))
+      })) : [];
+      const resultByRank = new Map<number, Result>();
+      for (const r of loadedResults) {
+        if ([1,2,3].includes(r.rank) && !resultByRank.has(r.rank)) resultByRank.set(r.rank, r);
+      }
+      setResults([1,2,3].map(rank => resultByRank.get(rank) ?? ({
+        id:uid(), rank, player_id:"", bey1:"", bey2:"", bey3:"", points:rank===1?3:rank===2?2:1
+      })));
+
+      setCustoms(Array.isArray(crows) ? crows.map((r:any)=>({ id:r.id, label:String(r.label??r.name??r.title??"CUSTOM"), value:typeof (r.custom_data??r.custom??r.value) === "string" ? String(r.custom_data??r.custom??r.value) : JSON.stringify(r.custom_data??r.custom??r.value??"") })) : []);
+
+      // Always keep exactly two team slots, one for 1ST and one for 2ND.
+      if (Array.isArray(trows)) {
+        const ids=trows.map((r:any)=>String(r.id)).filter(Boolean);
+        let members:any[]=[];
+        if(ids.length){ const mr=await api(`/rest/v1/team_members?select=*&team_id=in.(${ids.map(enc).join(",")})`,{},session?.access_token); if(mr.ok) members=await mr.json(); }
+        const loadedTeams = trows.map((r:any)=>({
+          id:r.id,
+          name:String(r.name??r.team_name??"TEAM"),
+          rank:(Number(r.rank??r.place??1)===2?2:1) as 1|2,
+          members:members.filter(m=>String(m.team_id??"")===String(r.id)).map(m=>String(m.player_id??m.player_name??""))
+        }));
+        const teamByRank = new Map<number, Team>();
+        for (const t of loadedTeams) {
+          if ((t.rank===1 || t.rank===2) && !teamByRank.has(t.rank)) teamByRank.set(t.rank, t);
+        }
+        setTeams([1,2].map(rank => {
+          const existing=teamByRank.get(rank);
+          return existing ? {...existing, members:[...existing.members.slice(0,3),"",""].slice(0,3)} : {
+            id:uid(), name:`TEAM ${rank}`, rank:rank as 1|2, members:["","",""]
+          };
+        }));
+      } else {
+        setTeams(emptyTeams());
+      }
+    } catch(e){ setMessage(errText(e)); } finally { setLoadingDetail(false); }
+  };
+
+  const emptyResults = (): Result[] => [
+    {id:uid(),rank:1,player_id:"",bey1:"",bey2:"",bey3:"",points:3},
+    {id:uid(),rank:2,player_id:"",bey1:"",bey2:"",bey3:"",points:2},
+    {id:uid(),rank:3,player_id:"",bey1:"",bey2:"",bey3:"",points:1},
+  ];
+
+  const emptyTeams = (): Team[] => [
+    {id:uid(),name:"TEAM 1",rank:1,members:["","",""]},
+    {id:uid(),name:"TEAM 2",rank:2,members:["","",""]},
+  ];
+
+  const newTournament = () => {
+    const id=uid();
+    setTournaments(v=>[...v,{id,name:"NEW MIDNIGHT BEY CLUB",date:"",location:"",status:"UPCOMING",format:"3ON3"}]);
+    setSelectedId(id); setResults(emptyResults()); setTeams(emptyTeams()); setCustoms([]);
+  };
+  const updateT=(field:keyof Tournament,value:string)=>setTournaments(v=>v.map(t=>t.id===selectedId?({...t,[field]:value} as Tournament):t));
+  // Result/team counts are fixed. Nothing can accidentally remove a slot.
+  const addResult=()=>{};
+  const addTeam=()=>{};
+  const addCustom=()=>setCustoms(v=>[...v,{id:uid(),label:"CUSTOM",value:""}]);
+
+  const save = async () => {
+    if(!session?.access_token || !selected) return;
+    setSaving(true); setMessage("SAVING...");
+    try {
+      const tBody={name:selected.name,tournament_date:dateIn(selected.date),location:selected.location,status:selected.status,format:selected.format};
+      let res=await api(`/rest/v1/tournaments?id=eq.${enc(selected.id)}`,{method:"PATCH",headers:{Prefer:"return=representation"},body:JSON.stringify(tBody)},session.access_token);
+      if(!res.ok){
+        res=await api("/rest/v1/tournaments",{method:"POST",headers:{Prefer:"return=representation"},body:JSON.stringify({id:selected.id,...tBody})},session.access_token);
+        if(!res.ok) throw new Error(`TOURNAMENT SAVE FAILED: ${await res.text()}`);
+      }
+
+      // 3ON3 results are always editable and always saved. The format selector
+      // is metadata only and never hides or deletes either editor.
+      const oldResultsResponse=await api(`/rest/v1/tournament_results?tournament_id=eq.${enc(selected.id)}`,{},session.access_token);
+      if(oldResultsResponse.ok){
+        const oldResults=await oldResultsResponse.json();
+        for(const r of Array.isArray(oldResults)?oldResults:[]) if(r.id){
+          const x=await api(`/rest/v1/tournament_results?id=eq.${enc(String(r.id))}`,{method:"DELETE"},session.access_token);
+          if(!x.ok) throw new Error(`RESULT DELETE FAILED: ${await x.text()}`);
+        }
+      }
+      for(const r of results.filter(x=>x.player_id)){
+        const player=players.find(p=>p.id===r.player_id);
+        const body={
+          id:uid(), tournament_id:selected.id, player_id:r.player_id,
+          rank:r.rank, place:r.rank, placement:r.rank,
+          player_name:player?.nickname||player?.name||"PLAYER",
+          bey1:r.bey1,bey2:r.bey2,bey3:r.bey3,
+          bey_1:r.bey1,bey_2:r.bey2,bey_3:r.bey3,
+          points:r.rank===1?3:r.rank===2?2:1
+        };
+        const x=await api("/rest/v1/tournament_results",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(body)},session.access_token);
+        if(!x.ok) throw new Error(`RESULT SAVE FAILED: ${await x.text()}`);
+      }
+
+      // TEAM BATTLE is also always editable and always saved.
+      const oldTeamsResponse=await api(`/rest/v1/teams?tournament_id=eq.${enc(selected.id)}`,{},session.access_token);
+      if(oldTeamsResponse.ok){
+        const oldTeams=await oldTeamsResponse.json();
+        for(const r of Array.isArray(oldTeams)?oldTeams:[]) if(r.id){
+          const mr=await api(`/rest/v1/team_members?team_id=eq.${enc(String(r.id))}`,{method:"DELETE"},session.access_token);
+          if(!mr.ok) throw new Error(`TEAM MEMBER DELETE FAILED: ${await mr.text()}`);
+        }
+        for(const r of Array.isArray(oldTeams)?oldTeams:[]) if(r.id){
+          const tr=await api(`/rest/v1/teams?id=eq.${enc(String(r.id))}`,{method:"DELETE"},session.access_token);
+          if(!tr.ok) throw new Error(`TEAM DELETE FAILED: ${await tr.text()}`);
+        }
+      }
+      for(const team of teams.filter(t=>t.name.trim() || t.members.some(Boolean))){
+        const tid=uid();
+        const x=await api("/rest/v1/teams",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({
+          id:tid,tournament_id:selected.id,name:team.name,team_name:team.name,
+          rank:team.rank,place:team.rank,placement:team.rank,
+          points:team.rank===1?2:1
+        })},session.access_token);
+        if(!x.ok) throw new Error(`TEAM SAVE FAILED: ${await x.text()}`);
+        for(const pid of team.members.filter(Boolean)){
+          const m=await api("/rest/v1/team_members",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({id:uid(),team_id:tid,player_id:pid})},session.access_token);
+          if(!m.ok) throw new Error(`TEAM MEMBER SAVE FAILED: ${await m.text()}`);
+        }
+      }
+
+      // Replace custom fields so edits and deletions are reflected exactly.
+      const oldCustomResponse=await api(`/rest/v1/custom_registrations?tournament_id=eq.${enc(selected.id)}`,{},session.access_token);
+      if(oldCustomResponse.ok){
+        const oldCustoms=await oldCustomResponse.json();
+        for(const c of Array.isArray(oldCustoms)?oldCustoms:[]) if(c.id){
+          const x=await api(`/rest/v1/custom_registrations?id=eq.${enc(String(c.id))}`,{method:"DELETE"},session.access_token);
+          if(!x.ok) throw new Error(`CUSTOM DELETE FAILED: ${await x.text()}`);
+        }
+      }
+      for(const c of customs.filter(x=>x.label.trim()||x.value.trim())){
+        const body={id:uid(),tournament_id:selected.id,label:c.label,name:c.label,title:c.label,value:c.value,custom:c.value,custom_data:c.value};
+        const x=await api("/rest/v1/custom_registrations",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(body)},session.access_token);
+        if(!x.ok) throw new Error(`CUSTOM SAVE FAILED: ${await x.text()}`);
+      }
+
+      setMessage("SAVED BOTH 3ON3 + TEAM BATTLE.");
+      await loadAll();
+      await openTournament(selected.id);
+    } catch(e){ setMessage(errText(e)); } finally { setSaving(false); }
+  };
+
+  const sortedPlayers=useMemo(()=>[...players].sort((a,b)=>(b.points??0)-(a.points??0)),[players]);
+
+  if(authorized===false) return <main className="admin"><div className="gate"><p className="eyebrow">MIDNIGHT BEY CLUB</p><h1>ADMIN</h1><p>{message||"ADMIN ACCESS REQUIRED."}</p><a href="/" className="back">BACK TO SITE ↗</a></div><style jsx global>{styles}</style></main>;
+  if(authorized===null) return <main className="admin"><div className="gate"><p className="eyebrow">MIDNIGHT BEY CLUB</p><h1>ADMIN</h1><p>CHECKING ACCESS...</p></div><style jsx global>{styles}</style></main>;
+
+  return <main className="admin">
+    <header className="adminHeader"><div><div className="eyebrow">MIDNIGHT BEY CLUB</div><h1>ADMIN</h1><p>TOURNAMENT / PLAYER MANAGEMENT</p></div><a href="/" className="back">BACK TO SITE ↗</a></header>
+    <nav className="tabs"><button className={tab==="tournaments"?"active":""} onClick={()=>setTab("tournaments")}>TOURNAMENTS</button><button className={tab==="players"?"active":""} onClick={()=>setTab("players")}>PLAYERS / RANKING</button><button className="new" onClick={newTournament}>+ NEW TOURNAMENT</button></nav>
+    {tab==="tournaments" && <div className="workspace">
+      <aside className="list"><div className="listHead"><span>EVENTS</span><strong>{tournaments.length}</strong></div>{tournaments.length===0?<div className="empty">NO DATA</div>:tournaments.map(t=><button key={t.id} className={t.id===selectedId?"event active":"event"} onClick={()=>openTournament(t.id)}><span>{t.status}</span><strong>{t.name||"NO DATA"}</strong><small>{t.date||"NO DATE"} · {t.location||"NO LOCATION"}</small><em>{t.format}</em></button>)}</aside>
+      <section className="editor">{!selected?<div className="empty big">SELECT A TOURNAMENT<br/>OR CREATE A NEW ONE</div>:<>
+        <div className="editorHead"><div><span className="eyebrow">TOURNAMENT EDITOR</span><h2>{selected.name||"NEW TOURNAMENT"}</h2></div><span className="formatBadge">{selected.format==="3ON3"?"3ON3 / INDIVIDUAL":"TEAM BATTLE"}</span></div>
+        <div className="grid three"><Field label="TOURNAMENT NAME"><input value={selected.name} onChange={e=>updateT("name",e.target.value)}/></Field><Field label="DATE"><input value={selected.date} placeholder="2026.09.12" onChange={e=>updateT("date",e.target.value)}/></Field><Field label="LOCATION"><input value={selected.location} onChange={e=>updateT("location",e.target.value)}/></Field></div>
+        <div className="grid two"><Field label="PRIMARY FORMAT (DISPLAY ONLY)"><select value={selected.format} onChange={e=>updateT("format",e.target.value)}><option value="3ON3">3ON3 / INDIVIDUAL</option><option value="TEAM">TEAM BATTLE</option></select></Field><Field label="STATUS"><select value={selected.status} onChange={e=>updateT("status",e.target.value)}><option>ENTRY OPEN</option><option>UPCOMING</option><option>FINISHED</option></select></Field></div>
+        <section className="resultSection">
+          <div className="sectionTitle"><span>RESULT 01</span><h3>3ON3 TOP 3</h3><p>INDIVIDUAL RESULTS · 1ST = 3 PT · 2ND = 2 PT · 3RD = 1 PT</p></div>
+          {results.map((r,i)=><div className="resultRow" key={r.id??i}>
+            <div className="place">{r.rank}<small>{r.rank===1?"3 PT":r.rank===2?"2 PT":"1 PT"}</small></div>
+            <Field label="PLAYER"><select value={r.player_id} onChange={e=>setResults(v=>v.map(x=>x===r?{...x,player_id:e.target.value}:x))}><option value="">SELECT PLAYER</option>{players.map(p=><option key={p.id} value={p.id}>{p.nickname||p.name}</option>)}</select></Field>
+            {[1,2,3].map(n=><Field key={n} label={`BEY ${n}`}><input value={r[`bey${n}` as "bey1"|"bey2"|"bey3"]} onChange={e=>setResults(v=>v.map(x=>x===r?{...x,[`bey${n}`]:e.target.value}:x))}/></Field>)}
+          </div>)}
+          <div className="fixedNote">3 SLOTS · 1ST / 2ND / 3RD · SLOTS CANNOT BE DELETED</div>
+        </section>
+
+        <section className="resultSection">
+          <div className="sectionTitle"><span>RESULT 02</span><h3>TEAM BATTLE</h3><p>1ST TEAM = 2 PT EACH · 2ND TEAM = 1 PT EACH · 3 MEMBERS PER TEAM</p></div>
+          {teams.map((team,i)=><div className="teamEditor" key={team.id??i}>
+            <div className="teamTop"><strong>{team.rank===1?"1ST PLACE":"2ND PLACE"}</strong><select value={team.rank} onChange={e=>setTeams(v=>v.map(x=>x===team?{...x,rank:Number(e.target.value)===2?2:1}:x))}><option value="1">1ST</option><option value="2">2ND</option></select><input value={team.name} onChange={e=>setTeams(v=>v.map(x=>x===team?{...x,name:e.target.value}:x))}/></div>
+            <div className="members">{team.members.map((m,j)=><select key={j} value={m} onChange={e=>setTeams(v=>v.map(x=>x===team?{...x,members:x.members.map((z,k)=>k===j?e.target.value:z)}:x))}><option value="">MEMBER {j+1}</option>{players.map(p=><option key={p.id} value={p.id}>{p.nickname||p.name}</option>)}</select>)}</div>
+          </div>)}
+          <div className="fixedNote">2 SLOTS · 1ST TEAM / 2ND TEAM · SLOTS CANNOT BE DELETED</div>
+        </section>
+
+        <section className="resultSection"><div className="sectionTitle"><span>EXTRA DATA</span><h3>CUSTOM</h3><p>OPTIONAL INFORMATION FOR THIS TOURNAMENT</p></div>{customs.map((c,i)=><div className="customRow" key={c.id??i}><input className="labelInput" placeholder="LABEL" value={c.label} onChange={e=>setCustoms(v=>v.map(x=>x===c?{...x,label:e.target.value}:x))}/><input placeholder="VALUE" value={c.value} onChange={e=>setCustoms(v=>v.map(x=>x===c?{...x,value:e.target.value}:x))}/><button className="remove" onClick={()=>setCustoms(v=>v.filter(x=>x!==c))}>×</button></div>)}<button className="add" onClick={addCustom}>+ ADD CUSTOM FIELD</button></section>
+        <div className="saveBar"><span className={message.includes("FAILED")||message.includes("ERROR")?"error":"ok"}>{loadingDetail?"LOADING...":message}</span><button className="save" onClick={save} disabled={saving}>{saving?"SAVING...":"SAVE TO DATABASE"}</button></div>
+      </>}</section>
+    </div>}
+    {tab==="players" && <section className="panel"><div className="sectionTitle"><span>THE NUMBERS</span><h2>PLAYERS / RANKING</h2></div><div className="addPlayer"><div><label>PLAYER NAME</label><input value={newPlayerName} onChange={e=>setNewPlayerName(e.target.value)} placeholder="PLAYER NAME"/></div><div><label>NICKNAME</label><input value={newPlayerNickname} onChange={e=>setNewPlayerNickname(e.target.value)} placeholder="NICKNAME"/></div><div><label>STARTING POINTS</label><input type="number" min="0" value={newPlayerPoints} onChange={e=>setNewPlayerPoints(e.target.value)}/></div><button className="save" onClick={async()=>{const name=newPlayerName.trim();if(!name){setMessage("PLAYER NAME IS REQUIRED.");return}setSaving(true);try{const pts=Math.max(0,Number(newPlayerPoints||0));const r=await api("/rest/v1/players",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({id:uid(),name,nickname:newPlayerNickname.trim()||name,manual_points:pts,points:pts,wins:0,tournaments:0,is_active:true})},session?.access_token);if(!r.ok)throw new Error(await r.text());setNewPlayerName("");setNewPlayerNickname("");setNewPlayerPoints("0");setMessage("PLAYER ADDED.");await loadAll()}catch(e){setMessage(errText(e))}finally{setSaving(false)}}} disabled={saving}>+ ADD PLAYER</button></div>{sortedPlayers.length===0?<div className="empty">NO DATA</div>:<div className="playerList">{sortedPlayers.map((p,i)=><div className="player" key={p.id}><div className="rank">{String(i+1).padStart(2,"0")}</div><div><label>PLAYER</label><input value={p.name} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/></div><div><label>NICKNAME</label><input value={p.nickname??""} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,nickname:e.target.value}:x))}/></div><div><label>MANUAL POINTS</label><input type="number" min="0" value={p.manual_points??0} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,manual_points:Number(e.target.value||0)}:x))}/></div><div className="stat"><span>TOTAL PTS</span><strong>{p.points??0}</strong></div><div className="stat"><span>WINS</span><strong>{p.wins??0}</strong></div><div className="stat"><span>EVENTS</span><strong>{p.tournaments??0}</strong></div></div>)}</div>}<div className="saveArea"><span className="saved">CUMULATIVE POINTS · 3 / 2 / 1 · TEAM 2 / 1</span><button className="save" onClick={async()=>{setSaving(true);try{for(const p of players){const r=await api(`/rest/v1/players?id=eq.${enc(p.id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({name:p.name,nickname:p.nickname,manual_points:Number(p.manual_points??0)})},session?.access_token);if(!r.ok)throw new Error(await r.text())}setMessage("PLAYERS SAVED.")}catch(e){setMessage(errText(e))}finally{setSaving(false)}}} disabled={saving}>{saving?"SAVING...":"SAVE PLAYERS"}</button></div></section>}
+    <style jsx global>{styles}</style>
+  </main>;
 }
 
-const css=`*{box-sizing:border-box}body{margin:0;background:#08060d;color:#f4f1f8;font-family:Arial,Helvetica,sans-serif}button,input,select{font:inherit}.admin{min-height:100vh;padding:55px 5vw;background:radial-gradient(circle at 80% 0,#211233,transparent 35%),#08060d}header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid #292331;padding-bottom:28px}header small,.title small,.sect small{letter-spacing:4px;color:#8e8299;font-size:9px}header h1{font-size:68px;margin:10px 0 5px;letter-spacing:-4px}header p{margin:0;color:#756c7e;font-size:10px;letter-spacing:3px}header a{color:#fff;text-decoration:none;border:1px solid #3a3045;padding:13px 16px;font-size:9px;letter-spacing:2px}nav{display:flex;gap:9px;margin:25px 0}nav button,.add button,.addBtn{background:#0e0a13;border:1px solid #30263a;color:#aaa0b0;padding:12px 16px;font-size:9px;letter-spacing:2px;cursor:pointer}nav button.active,nav button:last-child{border-color:#9b6cff;color:#fff}.workspace{display:grid;grid-template-columns:300px 1fr;gap:16px}aside,.panel{border:1px solid #292331;background:#0c0912}.event{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #292331;background:transparent;color:#fff;padding:17px;cursor:pointer}.event.active{background:#171020;outline:1px solid #9b6cff}.event small,.event span{display:block;color:#77707f;font-size:8px;letter-spacing:1px}.event strong{display:block;margin:8px 0;font-size:12px}.panel{padding:30px}.title h2{font-size:38px;margin:8px 0 25px}.grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px}.grid label,.player label{font-size:8px;color:#81778b;letter-spacing:2px}.grid input,.grid select,.player input,.add input,.row input,.row select,.team input,.members select,.custom input{display:block;width:100%;margin-top:6px;background:#08060d;border:1px solid #332a3c;color:#fff;padding:11px;outline:0}.sect{border-top:1px solid #292331;padding-top:25px;margin-top:28px}.sect h3{font-size:27px;margin:8px 0}.sect p{color:#686071;font-size:8px;letter-spacing:2px}.row{display:grid;grid-template-columns:70px 1.5fr 1fr 1fr 1fr;gap:9px;align-items:end;border-bottom:1px solid #211c27;padding:14px 0}.row b{color:#9b6cff;font-size:18px}.row b small{font-size:8px;color:#777}.team{border:1px solid #292331;padding:15px;margin:10px 0}.team>div:first-child{display:grid;grid-template-columns:100px 1fr;gap:10px;align-items:center}.team b{font-size:10px;color:#9b6cff}.members{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:10px}.custom{display:grid;grid-template-columns:180px 1fr 35px;gap:9px;margin:9px 0}.custom button{background:transparent;border:1px solid #382e42;color:#aaa}.addBtn{margin-top:8px}.bottom{display:flex;justify-content:flex-end;align-items:center;gap:15px;margin-top:30px;color:#9b6cff;font-size:9px;letter-spacing:1px}.save{background:#f4f1f8;color:#08060d;border:0;padding:13px 20px;font-weight:700;font-size:9px;letter-spacing:2px;cursor:pointer}.save:disabled{opacity:.5}.add{display:grid;grid-template-columns:1fr 1fr auto;gap:9px;margin-bottom:20px}.players{border-top:1px solid #292331}.player{display:grid;grid-template-columns:50px 2fr 2fr 110px 100px 100px;gap:12px;align-items:end;border-bottom:1px solid #292331;padding:15px 0}.player>b{color:#9b6cff;font-size:21px;padding-bottom:12px}.gate{min-height:300px;display:grid;place-items:center;color:#81778b;text-align:center}.msg{color:#9b6cff;font-size:9px;letter-spacing:2px}@media(max-width:1000px){.workspace{grid-template-columns:1fr}.grid,.row,.members,.player,.add{grid-template-columns:1fr}.admin{padding:30px 16px}.custom{grid-template-columns:1fr}.bottom{display:block}.save{margin-top:12px}}`;
+function Field({label,children}:{label:string;children:React.ReactNode}){return <label className="field">{label}{children}</label>}
+
+const styles=`
+*{box-sizing:border-box}html,body{margin:0;background:#08060d;color:#f4f1f8;font-family:Arial,Helvetica,sans-serif}button,input,select{font:inherit}.admin{min-height:100vh;padding:55px 5vw;background:radial-gradient(circle at 75% 0,rgba(111,55,190,.16),transparent 34%),#08060d}.adminHeader{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:1px solid #292331;padding-bottom:30px}.eyebrow,.sectionTitle span{font-size:10px;letter-spacing:4px;color:#a99ab9}.adminHeader h1{font-size:72px;line-height:.9;margin:12px 0 8px;letter-spacing:-4px}.adminHeader p{margin:0;color:#8d8398;font-size:10px;letter-spacing:3px}.back{color:#f4f1f8;text-decoration:none;border:1px solid #40364d;padding:14px 18px;font-size:10px;letter-spacing:2px}.tabs{display:flex;gap:10px;margin:28px 0}.tabs button{border:1px solid #292331;background:#0d0a12;color:#8d8398;padding:13px 18px;font-size:10px;letter-spacing:2px;cursor:pointer}.tabs button.active{color:#fff;border-color:#9d6cff;background:#171020}.tabs .new{margin-left:auto;color:#fff;border-color:#9d6cff}.workspace{display:grid;grid-template-columns:310px 1fr;gap:18px}.list,.editor,.panel{border:1px solid #292331;background:#0c0912}.list{padding:16px;align-self:start}.listHead{display:flex;justify-content:space-between;padding:10px 8px 16px;color:#77717f;font-size:10px;letter-spacing:3px}.listHead strong{color:#9d6cff}.event{position:relative;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-bottom-color:#292331;color:#fff;padding:18px 12px;cursor:pointer}.event.active{background:#171020;border-color:#9d6cff}.event span{display:block;color:#77717f;font-size:8px;letter-spacing:2px}.event strong{display:block;margin:8px 0 5px;font-size:13px}.event small{color:#77717f;font-size:9px}.event em{position:absolute;right:12px;top:18px;color:#9d6cff;font-size:8px;font-style:normal;letter-spacing:1px}.editor{padding:34px}.editorHead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #292331;padding-bottom:25px;margin-bottom:25px}.editorHead h2{font-size:34px;margin:10px 0 0;letter-spacing:-1px}.formatBadge{border:1px solid #9d6cff;color:#c9b6ff;padding:10px 12px;font-size:9px;letter-spacing:2px}.grid{display:grid;gap:14px;margin-bottom:4px}.grid.three{grid-template-columns:2fr 1fr 1fr}.grid.two{grid-template-columns:1fr 1fr}.field{display:block;color:#80758e;font-size:9px;letter-spacing:2px;margin-bottom:14px}.field input,.field select,.customRow input,.teamTop input,.teamTop select,.members select{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.field input:focus,.field select:focus,input:focus,select:focus{border-color:#9d6cff}.resultSection{border-top:1px solid #292331;padding-top:30px;margin-top:30px}.resultSection+.resultSection{margin-top:34px}.resultSection h3{letter-spacing:-.5px}.sectionTitle h3{margin:8px 0 5px;font-size:27px}.sectionTitle p{margin:0 0 18px;color:#665d70;font-size:9px;letter-spacing:2px}.resultRow{display:grid;grid-template-columns:65px 1.3fr 1fr 1fr 1fr 34px;gap:10px;align-items:end;border-bottom:1px solid #201b27;padding:18px 0}.place{font-size:26px;color:#9d6cff;padding-bottom:18px}.place small{display:block;font-size:8px;color:#77717f;letter-spacing:1px;margin-top:3px}.remove{border:1px solid #392f44;background:transparent;color:#9a8da5;height:39px;cursor:pointer}.remove:hover{border-color:#ff6b81;color:#ff6b81}.add{border:1px dashed #493b55;background:transparent;color:#9d6cff;padding:13px 17px;margin-top:15px;cursor:pointer;font-size:9px;letter-spacing:2px}.fixedNote{margin-top:15px;color:#5f576b;font-size:8px;letter-spacing:2px}.teamEditor{border:1px solid #292331;padding:18px;margin-bottom:12px}.teamTop{display:grid;grid-template-columns:100px 80px 1fr 34px;gap:10px;align-items:center}.teamTop strong{color:#9d6cff;font-size:11px;letter-spacing:1px}.members{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.customRow{display:grid;grid-template-columns:180px 1fr 34px;gap:10px;margin-bottom:10px}.labelInput{max-width:180px}.saveBar,.saveArea{display:flex;justify-content:flex-end;align-items:center;gap:18px;margin-top:30px}.ok,.saved{color:#9d6cff;font-size:10px;letter-spacing:2px}.error{color:#ff6b81;font-size:10px;letter-spacing:1px;max-width:70%}.save{border:0;background:#f4f1f8;color:#08060d;padding:14px 22px;font-weight:700;font-size:10px;letter-spacing:2px;cursor:pointer}.save:hover{background:#9d6cff;color:#fff}.save:disabled{opacity:.5}.panel{padding:35px}.panel .sectionTitle h2{font-size:42px;margin:8px 0 30px}.addPlayer{display:grid;grid-template-columns:2fr 2fr 1fr auto;gap:12px;align-items:end;padding:20px;border:1px solid #292331;background:#100c16;margin-bottom:28px}.addPlayer input{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.playerList{border-top:1px solid #292331}.player{display:grid;grid-template-columns:55px 1.7fr 1.7fr 1.1fr 90px 90px 90px;gap:14px;align-items:end;border-bottom:1px solid #292331;padding:18px 0}.player label,.addPlayer label{display:block;color:#80758e;font-size:8px;letter-spacing:2px}.rank{font-size:24px;color:#9d6cff;padding-bottom:15px}.stat{text-align:center;padding-bottom:14px}.stat span{display:block;color:#5f576b;font-size:8px;letter-spacing:2px}.stat strong{font-size:19px}.empty,.gate{min-height:250px;display:grid;place-items:center;align-content:center;gap:15px;color:#77717f;text-align:center;letter-spacing:3px}.empty.big{min-height:500px}.gate h1{margin:0;font-size:65px}.gate p{font-size:10px}@media(max-width:1000px){.workspace{grid-template-columns:1fr}.grid.three,.grid.two,.resultRow,.members,.player,.addPlayer{grid-template-columns:1fr}.admin{padding:35px 18px}.adminHeader{display:block}.tabs{flex-wrap:wrap}.tabs .new{margin-left:0}.editor{padding:22px}.teamTop,.customRow{grid-template-columns:1fr}.labelInput{max-width:none}.saveBar,.saveArea{display:block}.save{margin-top:15px}}
+`;

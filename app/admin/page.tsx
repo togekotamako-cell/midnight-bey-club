@@ -248,52 +248,67 @@ export default function AdminPage() {
         if(!res.ok) throw new Error(`TOURNAMENT SAVE FAILED: ${await res.text()}`);
       }
 
-      // 3ON3 results are always editable and always saved. The format selector
-      // is metadata only and never hides or deletes either editor.
+      // 3ON3: fixed three slots. Update existing rows in place.
       const oldResultsResponse=await api(`/rest/v1/tournament_results?tournament_id=eq.${enc(selected.id)}`,{},session.access_token);
-      if(oldResultsResponse.ok){
-        const oldResults=await oldResultsResponse.json();
-        for(const r of Array.isArray(oldResults)?oldResults:[]) if(r.id){
-          const x=await api(`/rest/v1/tournament_results?id=eq.${enc(String(r.id))}`,{method:"DELETE"},session.access_token);
-          if(!x.ok) throw new Error(`RESULT DELETE FAILED: ${await x.text()}`);
-        }
+      const oldResults=oldResultsResponse.ok ? await oldResultsResponse.json() : [];
+      const oldByRank=new Map<number, any>();
+      for(const r of Array.isArray(oldResults)?oldResults:[]) {
+        const rank=Number(r.rank??r.place??r.placement);
+        if([1,2,3].includes(rank) && !oldByRank.has(rank)) oldByRank.set(rank,r);
       }
-      for(const r of results.filter(x=>x.player_id)){
+      for(const r of results) {
+        const old=oldByRank.get(r.rank);
+        if(!r.player_id) {
+          if(old?.id) {
+            const x=await api(`/rest/v1/tournament_results?id=eq.${enc(String(old.id))}`,{method:"DELETE"},session.access_token);
+            if(!x.ok) throw new Error(`RESULT CLEAR FAILED: ${await x.text()}`);
+          }
+          continue;
+        }
         const player=players.find(p=>p.id===r.player_id);
-        const body={
-          id:uid(), tournament_id:selected.id, player_id:r.player_id,
-          rank:r.rank, place:r.rank, placement:r.rank,
-          player_name:player?.nickname||player?.name||"PLAYER",
-          bey1:r.bey1,bey2:r.bey2,bey3:r.bey3,
-          bey_1:r.bey1,bey_2:r.bey2,bey_3:r.bey3,
-          points:r.rank===1?3:r.rank===2?2:1
-        };
-        const x=await api("/rest/v1/tournament_results",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(body)},session.access_token);
+        const body={tournament_id:selected.id,player_id:r.player_id,rank:r.rank,place:r.rank,placement:r.rank,player_name:player?.nickname||player?.name||"PLAYER",bey1:r.bey1,bey2:r.bey2,bey3:r.bey3,bey_1:r.bey1,bey_2:r.bey2,bey_3:r.bey3,points:r.rank===1?3:r.rank===2?2:1};
+        const x=old?.id
+          ? await api(`/rest/v1/tournament_results?id=eq.${enc(String(old.id))}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify(body)},session.access_token)
+          : await api("/rest/v1/tournament_results",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({id:uid(),...body})},session.access_token);
         if(!x.ok) throw new Error(`RESULT SAVE FAILED: ${await x.text()}`);
       }
 
-      // TEAM BATTLE is also always editable and always saved.
+      // TEAM BATTLE: fixed two slots. Update existing teams in place and replace
+      // only their three member rows. Other teams/events are never touched.
       const oldTeamsResponse=await api(`/rest/v1/teams?tournament_id=eq.${enc(selected.id)}`,{},session.access_token);
-      if(oldTeamsResponse.ok){
-        const oldTeams=await oldTeamsResponse.json();
-        for(const r of Array.isArray(oldTeams)?oldTeams:[]) if(r.id){
-          const mr=await api(`/rest/v1/team_members?team_id=eq.${enc(String(r.id))}`,{method:"DELETE"},session.access_token);
-          if(!mr.ok) throw new Error(`TEAM MEMBER DELETE FAILED: ${await mr.text()}`);
-        }
-        for(const r of Array.isArray(oldTeams)?oldTeams:[]) if(r.id){
-          const tr=await api(`/rest/v1/teams?id=eq.${enc(String(r.id))}`,{method:"DELETE"},session.access_token);
-          if(!tr.ok) throw new Error(`TEAM DELETE FAILED: ${await tr.text()}`);
-        }
+      const oldTeams=oldTeamsResponse.ok ? await oldTeamsResponse.json() : [];
+      const oldTeamByRank=new Map<number, any>();
+      for(const t of Array.isArray(oldTeams)?oldTeams:[]) {
+        const rank=Number(t.rank??t.place??t.placement);
+        if([1,2].includes(rank) && !oldTeamByRank.has(rank)) oldTeamByRank.set(rank,t);
       }
-      for(const team of teams.filter(t=>t.name.trim() || t.members.some(Boolean))){
-        const tid=uid();
-        const x=await api("/rest/v1/teams",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({
-          id:tid,tournament_id:selected.id,name:team.name,team_name:team.name,
-          rank:team.rank,place:team.rank,placement:team.rank,
-          points:team.rank===1?2:1
-        })},session.access_token);
-        if(!x.ok) throw new Error(`TEAM SAVE FAILED: ${await x.text()}`);
-        for(const pid of team.members.filter(Boolean)){
+      for(const team of teams) {
+        const old=oldTeamByRank.get(team.rank);
+        const hasData=team.name.trim() || team.members.some(Boolean);
+        if(!hasData) {
+          if(old?.id) {
+            const mr=await api(`/rest/v1/team_members?team_id=eq.${enc(String(old.id))}`,{method:"DELETE"},session.access_token);
+            if(!mr.ok) throw new Error(`TEAM MEMBER CLEAR FAILED: ${await mr.text()}`);
+            const tr=await api(`/rest/v1/teams?id=eq.${enc(String(old.id))}`,{method:"DELETE"},session.access_token);
+            if(!tr.ok) throw new Error(`TEAM CLEAR FAILED: ${await tr.text()}`);
+          }
+          continue;
+        }
+        const tid=old?.id || uid();
+        const teamBody={tournament_id:selected.id,name:team.name,team_name:team.name,rank:team.rank,place:team.rank,placement:team.rank,points:team.rank===1?2:1};
+        const tr=old?.id
+          ? await api(`/rest/v1/teams?id=eq.${enc(String(old.id))}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify(teamBody)},session.access_token)
+          : await api("/rest/v1/teams",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({id:tid,...teamBody})},session.access_token);
+        if(!tr.ok) throw new Error(`TEAM SAVE FAILED: ${await tr.text()}`);
+        const oldMembers=await api(`/rest/v1/team_members?team_id=eq.${enc(String(tid))}`,{},session.access_token);
+        if(oldMembers.ok) {
+          const members=await oldMembers.json();
+          for(const m of Array.isArray(members)?members:[]) if(m.id) {
+            const x=await api(`/rest/v1/team_members?id=eq.${enc(String(m.id))}`,{method:"DELETE"},session.access_token);
+            if(!x.ok) throw new Error(`TEAM MEMBER UPDATE FAILED: ${await x.text()}`);
+          }
+        }
+        for(const pid of team.members.filter(Boolean)) {
           const m=await api("/rest/v1/team_members",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({id:uid(),team_id:tid,player_id:pid})},session.access_token);
           if(!m.ok) throw new Error(`TEAM MEMBER SAVE FAILED: ${await m.text()}`);
         }
@@ -331,9 +346,9 @@ export default function AdminPage() {
     {tab==="tournaments" && <div className="workspace">
       <aside className="list"><div className="listHead"><span>EVENTS</span><strong>{tournaments.length}</strong></div>{tournaments.length===0?<div className="empty">NO DATA</div>:tournaments.map(t=><button key={t.id} className={t.id===selectedId?"event active":"event"} onClick={()=>openTournament(t.id)}><span>{t.status}</span><strong>{t.name||"NO DATA"}</strong><small>{t.date||"NO DATE"} · {t.location||"NO LOCATION"}</small><em>{t.format}</em></button>)}</aside>
       <section className="editor">{!selected?<div className="empty big">SELECT A TOURNAMENT<br/>OR CREATE A NEW ONE</div>:<>
-        <div className="editorHead"><div><span className="eyebrow">TOURNAMENT EDITOR</span><h2>{selected.name||"NEW TOURNAMENT"}</h2></div><span className="formatBadge">{selected.format==="3ON3"?"3ON3 / INDIVIDUAL":"TEAM BATTLE"}</span></div>
+        <div className="editorHead"><div><span className="eyebrow">TOURNAMENT EDITOR</span><h2>{selected.name||"NEW TOURNAMENT"}</h2></div><span className="formatBadge">3ON3 + TEAM BATTLE</span></div>
         <div className="grid three"><Field label="TOURNAMENT NAME"><input value={selected.name} onChange={e=>updateT("name",e.target.value)}/></Field><Field label="DATE"><input value={selected.date} placeholder="2026.09.12" onChange={e=>updateT("date",e.target.value)}/></Field><Field label="LOCATION"><input value={selected.location} onChange={e=>updateT("location",e.target.value)}/></Field></div>
-        <div className="grid two"><Field label="PRIMARY FORMAT (DISPLAY ONLY)"><select value={selected.format} onChange={e=>updateT("format",e.target.value)}><option value="3ON3">3ON3 / INDIVIDUAL</option><option value="TEAM">TEAM BATTLE</option></select></Field><Field label="STATUS"><select value={selected.status} onChange={e=>updateT("status",e.target.value)}><option>ENTRY OPEN</option><option>UPCOMING</option><option>FINISHED</option></select></Field></div>
+        <div className="grid two"><Field label="BATTLE FORMAT"><input value="3ON3 + TEAM BATTLE" readOnly /></Field><Field label="STATUS"><select value={selected.status} onChange={e=>updateT("status",e.target.value)}><option>ENTRY OPEN</option><option>UPCOMING</option><option>FINISHED</option></select></Field></div>
         <section className="resultSection">
           <div className="sectionTitle"><span>RESULT 01</span><h3>3ON3 TOP 3</h3><p>INDIVIDUAL RESULTS · 1ST = 3 PT · 2ND = 2 PT · 3RD = 1 PT</p></div>
           {results.map((r,i)=><div className="resultRow" key={r.id??i}>
@@ -365,5 +380,5 @@ export default function AdminPage() {
 function Field({label,children}:{label:string;children:React.ReactNode}){return <label className="field">{label}{children}</label>}
 
 const styles=`
-*{box-sizing:border-box}html,body{margin:0;background:#08060d;color:#f4f1f8;font-family:Arial,Helvetica,sans-serif}button,input,select{font:inherit}.admin{min-height:100vh;padding:55px 5vw;background:radial-gradient(circle at 75% 0,rgba(111,55,190,.16),transparent 34%),#08060d}.adminHeader{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:1px solid #292331;padding-bottom:30px}.eyebrow,.sectionTitle span{font-size:10px;letter-spacing:4px;color:#a99ab9}.adminHeader h1{font-size:72px;line-height:.9;margin:12px 0 8px;letter-spacing:-4px}.adminHeader p{margin:0;color:#8d8398;font-size:10px;letter-spacing:3px}.back{color:#f4f1f8;text-decoration:none;border:1px solid #40364d;padding:14px 18px;font-size:10px;letter-spacing:2px}.tabs{display:flex;gap:10px;margin:28px 0}.tabs button{border:1px solid #292331;background:#0d0a12;color:#8d8398;padding:13px 18px;font-size:10px;letter-spacing:2px;cursor:pointer}.tabs button.active{color:#fff;border-color:#9d6cff;background:#171020}.tabs .new{margin-left:auto;color:#fff;border-color:#9d6cff}.workspace{display:grid;grid-template-columns:310px 1fr;gap:18px}.list,.editor,.panel{border:1px solid #292331;background:#0c0912}.list{padding:16px;align-self:start}.listHead{display:flex;justify-content:space-between;padding:10px 8px 16px;color:#77717f;font-size:10px;letter-spacing:3px}.listHead strong{color:#9d6cff}.event{position:relative;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-bottom-color:#292331;color:#fff;padding:18px 12px;cursor:pointer}.event.active{background:#171020;border-color:#9d6cff}.event span{display:block;color:#77717f;font-size:8px;letter-spacing:2px}.event strong{display:block;margin:8px 0 5px;font-size:13px}.event small{color:#77717f;font-size:9px}.event em{position:absolute;right:12px;top:18px;color:#9d6cff;font-size:8px;font-style:normal;letter-spacing:1px}.editor{padding:34px}.editorHead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #292331;padding-bottom:25px;margin-bottom:25px}.editorHead h2{font-size:34px;margin:10px 0 0;letter-spacing:-1px}.formatBadge{border:1px solid #9d6cff;color:#c9b6ff;padding:10px 12px;font-size:9px;letter-spacing:2px}.grid{display:grid;gap:14px;margin-bottom:4px}.grid.three{grid-template-columns:2fr 1fr 1fr}.grid.two{grid-template-columns:1fr 1fr}.field{display:block;color:#80758e;font-size:9px;letter-spacing:2px;margin-bottom:14px}.field input,.field select,.customRow input,.teamTop input,.teamTop select,.members select{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.field input:focus,.field select:focus,input:focus,select:focus{border-color:#9d6cff}.resultSection{border-top:1px solid #292331;padding-top:30px;margin-top:30px}.resultSection+.resultSection{margin-top:34px}.resultSection h3{letter-spacing:-.5px}.sectionTitle h3{margin:8px 0 5px;font-size:27px}.sectionTitle p{margin:0 0 18px;color:#665d70;font-size:9px;letter-spacing:2px}.resultRow{display:grid;grid-template-columns:65px 1.3fr 1fr 1fr 1fr 34px;gap:10px;align-items:end;border-bottom:1px solid #201b27;padding:18px 0}.place{font-size:26px;color:#9d6cff;padding-bottom:18px}.place small{display:block;font-size:8px;color:#77717f;letter-spacing:1px;margin-top:3px}.remove{border:1px solid #392f44;background:transparent;color:#9a8da5;height:39px;cursor:pointer}.remove:hover{border-color:#ff6b81;color:#ff6b81}.add{border:1px dashed #493b55;background:transparent;color:#9d6cff;padding:13px 17px;margin-top:15px;cursor:pointer;font-size:9px;letter-spacing:2px}.fixedNote{margin-top:15px;color:#5f576b;font-size:8px;letter-spacing:2px}.teamEditor{border:1px solid #292331;padding:18px;margin-bottom:12px}.teamTop{display:grid;grid-template-columns:100px 80px 1fr 34px;gap:10px;align-items:center}.teamTop strong{color:#9d6cff;font-size:11px;letter-spacing:1px}.members{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.customRow{display:grid;grid-template-columns:180px 1fr 34px;gap:10px;margin-bottom:10px}.labelInput{max-width:180px}.saveBar,.saveArea{display:flex;justify-content:flex-end;align-items:center;gap:18px;margin-top:30px}.ok,.saved{color:#9d6cff;font-size:10px;letter-spacing:2px}.error{color:#ff6b81;font-size:10px;letter-spacing:1px;max-width:70%}.save{border:0;background:#f4f1f8;color:#08060d;padding:14px 22px;font-weight:700;font-size:10px;letter-spacing:2px;cursor:pointer}.save:hover{background:#9d6cff;color:#fff}.save:disabled{opacity:.5}.panel{padding:35px}.panel .sectionTitle h2{font-size:42px;margin:8px 0 30px}.addPlayer{display:grid;grid-template-columns:2fr 2fr 1fr auto;gap:12px;align-items:end;padding:20px;border:1px solid #292331;background:#100c16;margin-bottom:28px}.addPlayer input{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.playerList{border-top:1px solid #292331}.player{display:grid;grid-template-columns:55px 1.7fr 1.7fr 1.1fr 90px 90px 90px;gap:14px;align-items:end;border-bottom:1px solid #292331;padding:18px 0}.player label,.addPlayer label{display:block;color:#80758e;font-size:8px;letter-spacing:2px}.rank{font-size:24px;color:#9d6cff;padding-bottom:15px}.stat{text-align:center;padding-bottom:14px}.stat span{display:block;color:#5f576b;font-size:8px;letter-spacing:2px}.stat strong{font-size:19px}.empty,.gate{min-height:250px;display:grid;place-items:center;align-content:center;gap:15px;color:#77717f;text-align:center;letter-spacing:3px}.empty.big{min-height:500px}.gate h1{margin:0;font-size:65px}.gate p{font-size:10px}@media(max-width:1000px){.workspace{grid-template-columns:1fr}.grid.three,.grid.two,.resultRow,.members,.player,.addPlayer{grid-template-columns:1fr}.admin{padding:35px 18px}.adminHeader{display:block}.tabs{flex-wrap:wrap}.tabs .new{margin-left:0}.editor{padding:22px}.teamTop,.customRow{grid-template-columns:1fr}.labelInput{max-width:none}.saveBar,.saveArea{display:block}.save{margin-top:15px}}
+*{box-sizing:border-box}html,body{margin:0;background:#08060d;color:#f4f1f8;font-family:Arial,Helvetica,sans-serif}button,input,select{font:inherit}.admin{min-height:100vh;padding:55px 5vw;background:radial-gradient(circle at 75% 0,rgba(111,55,190,.16),transparent 34%),#08060d}.adminHeader{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:1px solid #292331;padding-bottom:30px}.eyebrow,.sectionTitle span{font-size:10px;letter-spacing:4px;color:#a99ab9}.adminHeader h1{font-size:72px;line-height:.9;margin:12px 0 8px;letter-spacing:-4px}.adminHeader p{margin:0;color:#8d8398;font-size:10px;letter-spacing:3px}.back{color:#f4f1f8;text-decoration:none;border:1px solid #40364d;padding:14px 18px;font-size:10px;letter-spacing:2px}.tabs{display:flex;gap:10px;margin:28px 0}.tabs button{border:1px solid #292331;background:#0d0a12;color:#8d8398;padding:13px 18px;font-size:10px;letter-spacing:2px;cursor:pointer}.tabs button.active{color:#fff;border-color:#9d6cff;background:#171020}.tabs .new{margin-left:auto;color:#fff;border-color:#9d6cff}.workspace{display:grid;grid-template-columns:310px 1fr;gap:18px}.list,.editor,.panel{border:1px solid #292331;background:#0c0912}.list{padding:16px;align-self:start}.listHead{display:flex;justify-content:space-between;padding:10px 8px 16px;color:#77717f;font-size:10px;letter-spacing:3px}.listHead strong{color:#9d6cff}.event{position:relative;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-bottom-color:#292331;color:#fff;padding:18px 12px;cursor:pointer}.event.active{background:#171020;border-color:#9d6cff}.event span{display:block;color:#77717f;font-size:8px;letter-spacing:2px}.event strong{display:block;margin:8px 0 5px;font-size:13px}.event small{color:#77717f;font-size:9px}.event em{position:absolute;right:12px;top:18px;color:#9d6cff;font-size:8px;font-style:normal;letter-spacing:1px}.editor{padding:34px}.editorHead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #292331;padding-bottom:25px;margin-bottom:25px}.editorHead h2{font-size:34px;margin:10px 0 0;letter-spacing:-1px}.formatBadge{border:1px solid #9d6cff;color:#c9b6ff;padding:10px 12px;font-size:9px;letter-spacing:2px}.grid{display:grid;gap:14px;margin-bottom:4px}.grid.three{grid-template-columns:2fr 1fr 1fr}.grid.two{grid-template-columns:1fr 1fr}.field{display:block;color:#80758e;font-size:9px;letter-spacing:2px;margin-bottom:14px}.field input,.field select,.customRow input,.teamTop input,.teamTop select,.members select{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.field input:focus,.field select:focus,input:focus,select:focus{border-color:#9d6cff}.resultSection{border-top:1px solid #292331;padding-top:30px;margin-top:30px}.resultSection+.resultSection{margin-top:34px}.resultSection h3{letter-spacing:-.5px}.sectionTitle h3{margin:8px 0 5px;font-size:27px}.sectionTitle p{margin:0 0 18px;color:#665d70;font-size:9px;letter-spacing:2px}.resultRow{display:grid;grid-template-columns:65px 1.3fr 1fr 1fr 1fr 34px;gap:10px;align-items:end;border-bottom:1px solid #201b27;padding:18px 0}.place{font-size:26px;color:#9d6cff;padding-bottom:18px}.place small{display:block;font-size:8px;color:#77717f;letter-spacing:1px;margin-top:3px}.remove{border:1px solid #392f44;background:transparent;color:#9a8da5;height:39px;cursor:pointer}.remove:hover{border-color:#ff6b81;color:#ff6b81}.add{border:1px dashed #493b55;background:transparent;color:#9d6cff;padding:13px 17px;margin-top:15px;cursor:pointer;font-size:9px;letter-spacing:2px}.fixedNote{margin-top:15px;color:#5f576b;font-size:8px;letter-spacing:2px}.teamEditor{border:1px solid #292331;padding:18px;margin-bottom:12px}.teamTop{display:grid;grid-template-columns:100px 80px 1fr 34px;gap:10px;align-items:center}.teamTop strong{color:#9d6cff;font-size:11px;letter-spacing:1px}.members{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.customRow{display:grid;grid-template-columns:180px 1fr 34px;gap:10px;margin-bottom:10px}.labelInput{max-width:180px}.saveBar,.saveArea{display:flex;justify-content:flex-end;align-items:center;gap:18px;margin-top:30px}.ok,.saved{color:#9d6cff;font-size:10px;letter-spacing:2px}.error{color:#ff6b81;font-size:10px;letter-spacing:1px;max-width:70%}.save{border:0;background:#f4f1f8;color:#08060d;padding:14px 22px;font-weight:700;font-size:10px;letter-spacing:2px;cursor:pointer}.save:hover{background:#9d6cff;color:#fff}.save:disabled{opacity:.5}.panel{padding:35px}.panel .sectionTitle h2{font-size:42px;margin:8px 0 30px}.addPlayer{display:grid;grid-template-columns:2fr 2fr 1fr auto;gap:12px;align-items:end;padding:20px;border:1px solid #292331;background:#100c16;margin-bottom:28px}.addPlayer input{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.playerList{border-top:1px solid #292331}.playerList,.playerList *{color:#9d6cff !important}.playerList input{color:#9d6cff !important}.player{display:grid;grid-template-columns:55px 1.7fr 1.7fr 1.1fr 90px 90px 90px;gap:14px;align-items:end;border-bottom:1px solid #292331;padding:18px 0}.player label,.addPlayer label{display:block;color:#80758e;font-size:8px;letter-spacing:2px}.rank{font-size:24px;color:#9d6cff;padding-bottom:15px}.stat{text-align:center;padding-bottom:14px}.stat span{display:block;color:#5f576b;font-size:8px;letter-spacing:2px}.stat strong{font-size:19px}.empty,.gate{min-height:250px;display:grid;place-items:center;align-content:center;gap:15px;color:#77717f;text-align:center;letter-spacing:3px}.empty.big{min-height:500px}.gate h1{margin:0;font-size:65px}.gate p{font-size:10px}@media(max-width:1000px){.workspace{grid-template-columns:1fr}.grid.three,.grid.two,.resultRow,.members,.player,.addPlayer{grid-template-columns:1fr}.admin{padding:35px 18px}.adminHeader{display:block}.tabs{flex-wrap:wrap}.tabs .new{margin-left:0}.editor{padding:22px}.teamTop,.customRow{grid-template-columns:1fr}.labelInput{max-width:none}.saveBar,.saveArea{display:block}.save{margin-top:15px}}
 `;

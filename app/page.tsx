@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
-type TournamentType = "3ON3" | "TEAM BATTLE";
 
 type Tournament = {
   id: string;
@@ -12,7 +11,6 @@ type Tournament = {
   date: string;
   location: string;
   status: TournamentStatus;
-  type: TournamentType;
 };
 
 type Player = {
@@ -46,7 +44,6 @@ const fallbackTournaments: Tournament[] = [
     date: "2026.09.12",
     location: "KANAGAWA",
     status: "ENTRY OPEN",
-    type: "3ON3",
   },
   {
     id: "fallback-2",
@@ -54,7 +51,6 @@ const fallbackTournaments: Tournament[] = [
     date: "2026.10.10",
     location: "YOKOHAMA",
     status: "UPCOMING",
-    type: "3ON3",
   },
   {
     id: "fallback-3",
@@ -62,7 +58,6 @@ const fallbackTournaments: Tournament[] = [
     date: "",
     location: "",
     status: "UPCOMING",
-    type: "TEAM BATTLE",
   },
 ];
 
@@ -140,26 +135,6 @@ function getResultPlayerId(row: ResultRow) {
 
 function getResultTeamId(row: ResultRow) {
   return stringFrom(row, ["team_id", "teamId"]);
-}
-
-function getTournamentType(row: ResultRow): TournamentType {
-  const raw = String(
-    valueFrom(row, [
-      "tournament_type",
-      "type",
-      "format",
-      "match_type",
-      "event_type",
-    ]) ?? ""
-  ).toUpperCase();
-
-  return raw.includes("TEAM") || raw.includes("チーム")
-    ? "TEAM BATTLE"
-    : "3ON3";
-}
-
-function tournamentTypeLabel(type: TournamentType) {
-  return type === "TEAM BATTLE" ? "TEAM BATTLE" : "3ON3";
 }
 
 function getResultName(row: ResultRow, players: Player[]) {
@@ -289,7 +264,7 @@ export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountMode, setAccountMode] = useState<"login" | "signup">("login");
-  const [email, setEmail] = useState("");
+  const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
@@ -319,7 +294,7 @@ export default function Home() {
 
       try {
         const tournamentResponse = await supabaseFetch(
-          "/rest/v1/tournaments?select=*&order=tournament_date.asc"
+          "/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=tournament_date.asc"
         );
 
         if (tournamentResponse.ok) {
@@ -332,7 +307,6 @@ export default function Home() {
                 date: displayDate(row.tournament_date ?? row.date),
                 location: String(row.location ?? ""),
                 status: String(row.status ?? "UPCOMING") as TournamentStatus,
-                type: getTournamentType(row),
               }))
             );
           }
@@ -480,7 +454,6 @@ export default function Home() {
         date: "",
         location: "",
         status: "UPCOMING",
-        type: "3ON3",
       });
     }
 
@@ -491,9 +464,17 @@ export default function Home() {
     (t) => t.status === "FINISHED"
   ).length;
 
+  // The user only sees an ID. Supabase Auth receives an internal synthetic email address.\n  const accountEmail = (id: string) =>
+    `${id.trim().toLowerCase()}@id.midnightbey.club`;
+
   const signUp = async () => {
-    if (!email || !password) {
-      setAccountMessage("EMAIL AND PASSWORD ARE REQUIRED.");
+    if (!loginId.trim() || !password) {
+      setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
+      return;
+    }
+
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(loginId.trim())) {
+      setAccountMessage("ID MUST BE 3-32 CHARACTERS.");
       return;
     }
 
@@ -501,20 +482,18 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/auth/v1/signup`,
-        {
-          method: "POST",
-          headers: apiHeaders(),
-          body: JSON.stringify({
-            email,
-            password,
-            data: {
-              display_name: displayName,
-            },
-          }),
-        }
-      );
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify({
+          email: accountEmail(loginId),
+          password,
+          data: {
+            login_id: loginId.trim(),
+            display_name: displayName.trim(),
+          },
+        }),
+      });
 
       const data = await response.json();
 
@@ -529,14 +508,18 @@ export default function Home() {
           "midnight_session",
           JSON.stringify(nextSession)
         );
-        await syncAccount(nextSession.access_token, data.user?.id);
+        await syncAccount(
+          nextSession.access_token,
+          data.user?.id,
+          loginId.trim(),
+          displayName.trim()
+        );
+        setAccountMessage("ACCOUNT CREATED.");
+      } else {
+        setAccountMessage(
+          "ACCOUNT CREATED. IF EMAIL CONFIRMATION IS ENABLED, THE ACCOUNT MUST BE CONFIRMED BY THE SITE OWNER."
+        );
       }
-
-      setAccountMessage(
-        data?.access_token
-          ? "ACCOUNT CREATED."
-          : "ACCOUNT CREATED. CHECK YOUR EMAIL TO CONFIRM."
-      );
     } catch (error) {
       setAccountMessage(
         error instanceof Error ? error.message : "SIGN UP FAILED."
@@ -547,8 +530,8 @@ export default function Home() {
   };
 
   const login = async () => {
-    if (!email || !password) {
-      setAccountMessage("EMAIL AND PASSWORD ARE REQUIRED.");
+    if (!loginId.trim() || !password) {
+      setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
       return;
     }
 
@@ -562,7 +545,7 @@ export default function Home() {
           method: "POST",
           headers: apiHeaders(),
           body: JSON.stringify({
-            email,
+            email: accountEmail(loginId),
             password,
           }),
         }
@@ -583,7 +566,12 @@ export default function Home() {
         JSON.stringify(nextSession)
       );
 
-      await syncAccount(nextSession.access_token, data.user?.id);
+      await syncAccount(
+        nextSession.access_token,
+        data.user?.id,
+        loginId.trim(),
+        displayName.trim()
+      );
       setAccountMessage("LOGGED IN.");
     } catch (error) {
       setAccountMessage(
@@ -596,7 +584,9 @@ export default function Home() {
 
   const syncAccount = async (
     accessToken: string,
-    userId?: string
+    userId?: string,
+    id?: string,
+    name?: string
   ) => {
     if (!userId) return;
 
@@ -609,7 +599,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           id: userId,
-          display_name: displayName || email.split("@")[0],
+          display_name: name || id || "PLAYER",
         }),
       },
       accessToken
@@ -665,6 +655,33 @@ export default function Home() {
     setSession(null);
     window.localStorage.removeItem("midnight_session");
     setAccountMessage("LOGGED OUT.");
+  };
+
+  const openAdmin = async () => {
+    if (!session?.access_token || !session.user?.id) {
+      setAccountMessage("LOGIN REQUIRED.");
+      return;
+    }
+
+    const response = await supabaseFetch(
+      `/rest/v1/accounts?select=is_admin&limit=1&id=eq.${encodeURIComponent(
+        session.user.id
+      )}`,
+      {},
+      session.access_token
+    );
+
+    if (!response.ok) {
+      setAccountMessage("ADMIN CHECK FAILED.");
+      return;
+    }
+
+    const rows = await response.json();
+    if (rows?.[0]?.is_admin === true) {
+      window.location.href = "/admin";
+    } else {
+      setAccountMessage("ADMIN ACCESS REQUIRED.");
+    }
   };
 
   const resultRowsSorted = useMemo(
@@ -807,7 +824,7 @@ export default function Home() {
                   >
                     {noData ? "NO DATA" : tournament.status}
                   </span>
-                  <span>{noData ? "—" : tournamentTypeLabel(tournament.type)}</span>
+                  <span>#{String(index + 1).padStart(2, "0")}</span>
                 </div>
 
                 <div className="card-main">
@@ -820,9 +837,7 @@ export default function Home() {
                   <h3>{tournament.name}</h3>
 
                   <p className="location">
-                    {noData
-                      ? "SELECTABLE / FUTURE EVENT"
-                      : tournament.location || "LOCATION TBA"}
+                    {tournament.location || "ARCHIVE SLOT"}
                   </p>
                 </div>
 
@@ -849,7 +864,7 @@ export default function Home() {
         ) : players.length === 0 ? (
           <div className="empty-state">
             <strong>NO DATA</strong>
-            <span>PLAYER DATA WILL APPEAR HERE.</span>
+            <span>PLAYER RANKING WILL APPEAR HERE.</span>
           </div>
         ) : (
           <>
@@ -973,7 +988,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / ARCHIVE
+              TOURNAMENT / #{String(selectedTournament.id).padStart(2, "0")}
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -997,15 +1012,10 @@ export default function Home() {
                     {selectedTournament.location || "LOCATION TBA"}
                   </span>
                   <span>{selectedTournament.status}</span>
-                  <span>{tournamentTypeLabel(selectedTournament.type)}</span>
                 </div>
 
                 <div className="detail-block">
-                  <div className="detail-title">
-                    {selectedTournament.type === "TEAM BATTLE"
-                      ? "TEAM BATTLE RESULTS"
-                      : "3ON3 RESULTS / 3 BEYS"}
-                  </div>
+                  <div className="detail-title">RESULTS</div>
 
                   {resultRowsSorted.length === 0 ? (
                     <div className="detail-no-data">NO DATA</div>
@@ -1056,8 +1066,7 @@ export default function Home() {
                   )}
                 </div>
 
-                {selectedTournament.type === "TEAM BATTLE" &&
-                  teamRows.length > 0 && (
+                {teamRows.length > 0 && (
                   <div className="detail-block">
                     <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
@@ -1115,7 +1124,7 @@ export default function Home() {
                 {resultRowsSorted.length === 0 &&
                   customRows.length > 0 && (
                     <div className="detail-block">
-                      <div className="detail-title">3ON3 / 3 BEYS</div>
+                      <div className="detail-title">CUSTOM</div>
                       <div className="custom-list">
                         {customRows.map((row, index) => (
                           <div className="custom-registration" key={String(row.id ?? index)}>
@@ -1160,7 +1169,7 @@ export default function Home() {
               <>
                 <h2>ACCOUNT</h2>
                 <p className="account-email">
-                  {session.user?.email || "SIGNED IN"}
+                  {loginId || "SIGNED IN"}
                 </p>
 
                 <div className="account-block">
@@ -1191,6 +1200,14 @@ export default function Home() {
                 </div>
 
                 <button
+                  className="primary-button full"
+                  onClick={openAdmin}
+                  type="button"
+                >
+                  ADMIN
+                </button>
+
+                <button
                   className="secondary-button"
                   onClick={logout}
                   type="button"
@@ -1217,13 +1234,17 @@ export default function Home() {
                 )}
 
                 <div className="account-field">
-                  <label htmlFor="email">EMAIL</label>
+                  <label htmlFor="login-id">ID</label>
                   <input
-                    id="email"
-                    type="email"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    placeholder="EMAIL"
+                    id="login-id"
+                    type="text"
+                    value={loginId}
+                    onChange={(event) =>
+                      setLoginId(event.target.value.replace(/\\s/g, ""))
+                    }
+                    placeholder="YOUR ID"
+                    autoComplete="username"
+                    maxLength={32}
                   />
                 </div>
 

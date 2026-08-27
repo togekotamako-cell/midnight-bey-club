@@ -4,13 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED";
+type TournamentType = "3ON3" | "TEAM BATTLE";
 
 type Tournament = {
-  id: number;
+  id: string;
   name: string;
   date: string;
   location: string;
   status: TournamentStatus;
+  type: TournamentType;
 };
 
 type Player = {
@@ -39,25 +41,28 @@ const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 
 const fallbackTournaments: Tournament[] = [
   {
-    id: 1,
+    id: "fallback-1",
     name: "MIDNIGHT BEY CLUB #01",
     date: "2026.09.12",
     location: "KANAGAWA",
     status: "ENTRY OPEN",
+    type: "3ON3",
   },
   {
-    id: 2,
+    id: "fallback-2",
     name: "MIDNIGHT BEY CLUB #02",
     date: "2026.10.10",
     location: "YOKOHAMA",
     status: "UPCOMING",
+    type: "3ON3",
   },
   {
-    id: 3,
+    id: "fallback-3",
     name: "MIDNIGHT BEY CLUB #03",
     date: "",
     location: "",
     status: "UPCOMING",
+    type: "TEAM BATTLE",
   },
 ];
 
@@ -135,6 +140,26 @@ function getResultPlayerId(row: ResultRow) {
 
 function getResultTeamId(row: ResultRow) {
   return stringFrom(row, ["team_id", "teamId"]);
+}
+
+function getTournamentType(row: ResultRow): TournamentType {
+  const raw = String(
+    valueFrom(row, [
+      "tournament_type",
+      "type",
+      "format",
+      "match_type",
+      "event_type",
+    ]) ?? ""
+  ).toUpperCase();
+
+  return raw.includes("TEAM") || raw.includes("チーム")
+    ? "TEAM BATTLE"
+    : "3ON3";
+}
+
+function tournamentTypeLabel(type: TournamentType) {
+  return type === "TEAM BATTLE" ? "TEAM BATTLE" : "3ON3";
 }
 
 function getResultName(row: ResultRow, players: Player[]) {
@@ -294,7 +319,7 @@ export default function Home() {
 
       try {
         const tournamentResponse = await supabaseFetch(
-          "/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=id.asc"
+          "/rest/v1/tournaments?select=*&order=tournament_date.asc"
         );
 
         if (tournamentResponse.ok) {
@@ -302,11 +327,12 @@ export default function Home() {
           if (Array.isArray(rows) && rows.length) {
             setTournaments(
               rows.map((row: ResultRow) => ({
-                id: Number(row.id),
+                id: String(row.id),
                 name: String(row.name ?? `MIDNIGHT BEY CLUB #${row.id}`),
                 date: displayDate(row.tournament_date ?? row.date),
                 location: String(row.location ?? ""),
                 status: String(row.status ?? "UPCOMING") as TournamentStatus,
+                type: getTournamentType(row),
               }))
             );
           }
@@ -364,7 +390,7 @@ export default function Home() {
     setTeamRows([]);
     setTeamMemberRows([]);
 
-    if (!tournament.id || tournament.id < 0) return;
+    if (!tournament.id || tournament.id.startsWith("nodata-")) return;
 
     setDetailLoading(true);
 
@@ -435,19 +461,26 @@ export default function Home() {
   };
 
   const tournamentCards = useMemo(() => {
-    const actual = [...tournaments].sort((a, b) => a.id - b.id);
+    // Only real tournament records with a name are shown as tournaments.
+    // Empty/placeholder DB rows are treated as NO DATA instead of exposing UUIDs.
+    const actual = [...tournaments]
+      .filter((t) => t.name && t.name.trim() && t.name !== "NO DATA")
+      .sort((a, b) => {
+        const da = a.date || "9999.99.99";
+        const db = b.date || "9999.99.99";
+        return da.localeCompare(db);
+      });
 
-    const cards: Tournament[] = [...actual];
-    const maxId = actual.reduce((max, item) => Math.max(max, item.id), 0);
+    const cards: Tournament[] = actual.map((t) => ({ ...t }));
 
     while (cards.length < 3) {
-      const id = Math.max(cards.length + 1, maxId + 1);
       cards.push({
-        id,
+        id: `nodata-${cards.length + 1}`,
         name: "NO DATA",
         date: "",
         location: "",
         status: "UPCOMING",
+        type: "3ON3",
       });
     }
 
@@ -751,7 +784,7 @@ export default function Home() {
         </div>
 
         <div className="tournament-grid">
-          {tournamentCards.map((tournament) => {
+          {tournamentCards.map((tournament, index) => {
             const noData = tournament.name === "NO DATA";
 
             return (
@@ -762,7 +795,7 @@ export default function Home() {
                 type="button"
                 aria-label={
                   noData
-                    ? `Tournament ${tournament.id}, no data`
+                    ? `Tournament ${index + 1}, no data`
                     : tournament.name
                 }
               >
@@ -774,7 +807,7 @@ export default function Home() {
                   >
                     {noData ? "NO DATA" : tournament.status}
                   </span>
-                  <span>#{String(tournament.id).padStart(2, "0")}</span>
+                  <span>{noData ? "—" : tournamentTypeLabel(tournament.type)}</span>
                 </div>
 
                 <div className="card-main">
@@ -787,7 +820,9 @@ export default function Home() {
                   <h3>{tournament.name}</h3>
 
                   <p className="location">
-                    {tournament.location || "ARCHIVE SLOT"}
+                    {noData
+                      ? "SELECTABLE / FUTURE EVENT"
+                      : tournament.location || "LOCATION TBA"}
                   </p>
                 </div>
 
@@ -814,7 +849,7 @@ export default function Home() {
         ) : players.length === 0 ? (
           <div className="empty-state">
             <strong>NO DATA</strong>
-            <span>PLAYER RANKING WILL APPEAR HERE.</span>
+            <span>PLAYER DATA WILL APPEAR HERE.</span>
           </div>
         ) : (
           <>
@@ -938,7 +973,7 @@ export default function Home() {
             </button>
 
             <div className="modal-kicker">
-              TOURNAMENT / #{String(selectedTournament.id).padStart(2, "0")}
+              TOURNAMENT / ARCHIVE
             </div>
 
             <h2>{selectedTournament.name}</h2>
@@ -962,10 +997,15 @@ export default function Home() {
                     {selectedTournament.location || "LOCATION TBA"}
                   </span>
                   <span>{selectedTournament.status}</span>
+                  <span>{tournamentTypeLabel(selectedTournament.type)}</span>
                 </div>
 
                 <div className="detail-block">
-                  <div className="detail-title">RESULTS</div>
+                  <div className="detail-title">
+                    {selectedTournament.type === "TEAM BATTLE"
+                      ? "TEAM BATTLE RESULTS"
+                      : "3ON3 RESULTS / 3 BEYS"}
+                  </div>
 
                   {resultRowsSorted.length === 0 ? (
                     <div className="detail-no-data">NO DATA</div>
@@ -1016,7 +1056,8 @@ export default function Home() {
                   )}
                 </div>
 
-                {teamRows.length > 0 && (
+                {selectedTournament.type === "TEAM BATTLE" &&
+                  teamRows.length > 0 && (
                   <div className="detail-block">
                     <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
@@ -1074,7 +1115,7 @@ export default function Home() {
                 {resultRowsSorted.length === 0 &&
                   customRows.length > 0 && (
                     <div className="detail-block">
-                      <div className="detail-title">CUSTOM</div>
+                      <div className="detail-title">3ON3 / 3 BEYS</div>
                       <div className="custom-list">
                         {customRows.map((row, index) => (
                           <div className="custom-registration" key={String(row.id ?? index)}>

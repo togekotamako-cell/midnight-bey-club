@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED" | "NO DATA";
@@ -30,6 +30,8 @@ type ResultRow = Record<string, unknown>;
 type Session = {
   access_token: string;
   refresh_token?: string;
+  expires_in?: number;
+  expires_at?: number;
   user?: {
     id: string;
     email?: string;
@@ -311,7 +313,6 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
-  const [playerPickerOpen, setPlayerPickerOpen] = useState(false);
   const [accountIsAdmin, setAccountIsAdmin] = useState(false);
   const [accountMessage, setAccountMessage] = useState("");
   const [accountLoading, setAccountLoading] = useState(false);
@@ -332,6 +333,57 @@ export default function Home() {
       }
     }
   }, []);
+
+  const refreshInFlight = useRef(false);
+
+  const refreshSession = async (currentSession?: Session | null) => {
+    const activeSession = currentSession ?? session;
+    const refreshToken = activeSession?.refresh_token;
+
+    if (!refreshToken || refreshInFlight.current) return activeSession ?? null;
+
+    refreshInFlight.current = true;
+
+    try {
+      const response = await fetch(
+        `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
+        {
+          method: "POST",
+          headers: apiHeaders(),
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok || !data?.access_token || !data?.user?.id) {
+        throw new Error(
+          data?.error_description ||
+            data?.msg ||
+            "SESSION REFRESH FAILED."
+        );
+      }
+
+      const nextSession: Session = {
+        ...data,
+        refresh_token: data.refresh_token || refreshToken,
+      };
+
+      setSession(nextSession);
+      window.localStorage.setItem(
+        "midnight_session",
+        JSON.stringify(nextSession)
+      );
+
+      await loadAccountProfile(nextSession.access_token, data.user.id);
+      return nextSession;
+    } catch (error) {
+      console.warn("Automatic session refresh failed.", error);
+      return activeSession ?? null;
+    } finally {
+      refreshInFlight.current = false;
+    }
+  };
 
   const loadAccountProfile = async (accessToken: string, userId: string) => {
     try {
@@ -363,6 +415,57 @@ export default function Home() {
     if (session?.access_token && session.user?.id) {
       loadAccountProfile(session.access_token, session.user.id);
     }
+  }, [session]);
+
+  // Keep the member session alive automatically. Supabase access tokens are
+  // short-lived, so refresh before expiry and again whenever the tab becomes active.
+  useEffect(() => {
+    if (!session?.refresh_token) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const scheduleRefresh = (active: Session) => {
+      if (cancelled) return;
+
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAt =
+        active.expires_at ??
+        (active.expires_in ? now + active.expires_in : now + 3600);
+
+      // Refresh 5 minutes before expiry, with a minimum 30-second delay.
+      const delay = Math.max((expiresAt - now - 300) * 1000, 30_000);
+
+      timer = window.setTimeout(async () => {
+        const refreshed = await refreshSession(active);
+        if (!cancelled && refreshed) scheduleRefresh(refreshed);
+      }, delay);
+    };
+
+    const handleVisibility = async () => {
+      if (document.visibilityState !== "visible") return;
+
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAt =
+        session.expires_at ??
+        (session.expires_in ? now + session.expires_in : now + 3600);
+
+      if (expiresAt - now <= 300) {
+        const refreshed = await refreshSession(session);
+        if (!cancelled && refreshed) {
+          scheduleRefresh(refreshed);
+        }
+      }
+    };
+
+    scheduleRefresh(session);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
   }, [session]);
 
   useEffect(() => {
@@ -1305,58 +1408,20 @@ export default function Home() {
 
                 <div className="account-block">
                   <label htmlFor="player-link">PLAYER</label>
-                  <div className="player-picker">
-                    <button
-                      type="button"
-                      id="player-link"
-                      className="player-picker-display"
-                      onClick={() => setPlayerPickerOpen((open) => !open)}
-                      aria-haspopup="listbox"
-                      aria-expanded={playerPickerOpen}
-                    >
-                      <span className={selectedPlayerId ? "selected-player-name" : "selected-player-placeholder"}>
-                        {selectedPlayerId
-                          ? (players.find((p) => String(p.id) === String(selectedPlayerId))?.nickname ||
-                             players.find((p) => String(p.id) === String(selectedPlayerId))?.name ||
-                             "SELECT PLAYER")
-                          : "SELECT PLAYER"}
-                      </span>
-                      <span className="player-picker-arrow">⌄</span>
-                    </button>
-                    {playerPickerOpen && (
-                      <div className="player-picker-menu" role="listbox" aria-labelledby="player-link">
-                        <button
-                          type="button"
-                          className={`player-picker-option ${!selectedPlayerId ? "active" : ""}`}
-                          onClick={() => {
-                            setSelectedPlayerId("");
-                            setPlayerPickerOpen(false);
-                          }}
-                        >
-                          SELECT PLAYER
-                        </button>
-                        {players.map((player) => {
-                          const playerName = player.nickname || player.name;
-                          const active = String(player.id) === String(selectedPlayerId);
-                          return (
-                            <button
-                              type="button"
-                              role="option"
-                              aria-selected={active}
-                              className={`player-picker-option ${active ? "active" : ""}`}
-                              key={player.id}
-                              onClick={() => {
-                                setSelectedPlayerId(String(player.id));
-                                setPlayerPickerOpen(false);
-                              }}
-                            >
-                              {playerName}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  <select
+                    id="player-link"
+                    value={selectedPlayerId}
+                    onChange={(event) =>
+                      setSelectedPlayerId(event.target.value)
+                    }
+                  >
+                    <option value="">SELECT PLAYER</option>
+                    {players.map((player) => (
+                      <option value={player.id} key={player.id}>
+                        {player.nickname || player.name}
+                      </option>
+                    ))}
+                  </select>
 
                   <button
                     className="primary-button full"
@@ -2292,78 +2357,6 @@ export default function Home() {
           font-size: 8px;
           font-weight: 800;
           letter-spacing: 0.18em;
-        }
-
-        .player-picker {
-          position: relative;
-          width: 100%;
-        }
-
-        .player-picker-display {
-          width: 100%;
-          min-height: 50px;
-          box-sizing: border-box;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 14px;
-          border: 1px solid rgba(156, 104, 237, 0.45);
-          outline: none;
-          background: rgba(255, 255, 255, 0.035);
-          color: #a86cff;
-          font-weight: 700;
-        }
-
-
-        .player-picker-menu {
-          position: absolute;
-          z-index: 30;
-          left: 0;
-          right: 0;
-          top: calc(100% + 4px);
-          max-height: 240px;
-          overflow-y: auto;
-          border: 1px solid rgba(168, 108, 255, 0.55);
-          background: #0d0a12;
-          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
-        }
-
-        .player-picker-option {
-          display: block;
-          width: 100%;
-          padding: 13px 14px;
-          border: 0;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-          background: transparent;
-          color: #a86cff;
-          text-align: left;
-          font: inherit;
-          font-weight: 700;
-          cursor: pointer;
-        }
-
-        .player-picker-option:hover,
-        .player-picker-option.active {
-          background: rgba(168, 108, 255, 0.14);
-          color: #c49aff;
-        }
-        .selected-player-name {
-          color: #a86cff;
-        }
-
-        .selected-player-placeholder {
-          color: #77717f;
-        }
-
-        .player-picker-arrow {
-          color: #a86cff;
-          font-size: 18px;
-          line-height: 1;
-        }
-
-        .player-picker:focus-within .player-picker-display {
-          border-color: rgba(168, 108, 255, 0.95);
-          box-shadow: 0 0 0 1px rgba(168, 108, 255, 0.2);
         }
 
         .account-field input,

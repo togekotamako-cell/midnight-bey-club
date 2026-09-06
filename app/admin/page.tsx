@@ -20,7 +20,6 @@ async function api(path: string, init: RequestInit = {}, token?: string) {
   return fetch(`${URL}${path}`, { ...init, headers: { ...hdr(token), ...(init.headers || {}) }, cache: "no-store" });
 }
 function enc(v: string) { return encodeURIComponent(v); }
-async function rpc(name:string,body:Record<string,unknown>){const r=await fetch(`${URL}/rest/v1/rpc/${name}`,{method:"POST",headers:{apikey:KEY,Authorization:`Bearer ${KEY}`,"Content-Type":"application/json"},body:JSON.stringify(body),cache:"no-store"});const text=await r.text();let data:any=null;try{data=text?JSON.parse(text):null}catch{}if(!r.ok)throw new Error(data?.message||data?.error||text||"REQUEST FAILED.");return data;}
 function dateOut(v: unknown) { const s = String(v ?? ""); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.replaceAll("-", ".") : s; }
 function dateIn(v: string) { return v.replaceAll(".", "-"); }
 function uid() { return crypto.randomUUID(); }
@@ -47,58 +46,94 @@ export default function AdminPage() {
       const raw = localStorage.getItem("midnight_session");
       if (!raw) return setAuthorized(false);
       const s = JSON.parse(raw) as Session;
-      if (!s?.access_token || !s.user_id) return setAuthorized(false);
+      if (!s?.access_token || !s.user_id || !s.login_id) return setAuthorized(false);
       setSession(s);
     } catch { setAuthorized(false); }
   }, []);
 
-  useEffect(() => {
-    if (!session?.access_token) return;
-
-    // Custom ID/password sessions are opaque tokens, not JWTs.
-    // This RPC validates the token and extends its 30-day server-side expiry.
-    const keepAlive = () => {
-      void rpc("get_account_session", { p_access_token: session.access_token })
-        .then((info) => {
-          if (!info?.user_id) throw new Error("SESSION EXPIRED");
-        })
-        .catch(() => {
-          localStorage.removeItem("midnight_session");
-          setSession(null);
-          setAuthorized(false);
-        });
-    };
-
-    keepAlive();
-    const timer = window.setInterval(keepAlive, 10 * 60_000);
-    window.addEventListener("focus", keepAlive);
-    document.addEventListener("visibilitychange", keepAlive);
-
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", keepAlive);
-      document.removeEventListener("visibilitychange", keepAlive);
-    };
-  }, [session]);
-
   const loadAll = async () => {
-    if(!session?.access_token) return; setMessage("LOADING...");
-    const info=await rpc("get_account_session",{p_access_token:session.access_token});
-    if(!info?.is_admin){setAuthorized(false);setMessage("ADMIN ACCESS REQUIRED.");return;} setAuthorized(true);
-    const [tr,pr]=await Promise.all([api("/rest/v1/tournaments?select=*&order=tournament_date.asc"),api("/rest/v1/players?select=*&order=name.asc")]);
-    if(tr.ok){const rows=await tr.json();setTournaments(Array.isArray(rows)?rows.map((r:any)=>({id:String(r.id),name:String(r.name??""),date:dateOut(r.tournament_date??r.date),location:String(r.location??""),status:String(r.status??"UPCOMING") as Status,format:String(r.format??r.tournament_format??r.tournament_type??"3ON3").toUpperCase().includes("TEAM")?"TEAM":"3ON3"})):[])}
-    if(pr.ok){const rows=await pr.json();setPlayers(Array.isArray(rows)?rows.map((r:any)=>({id:String(r.id),name:String(r.name??"PLAYER"),nickname:r.nickname==null?null:String(r.nickname),points:Number(r.points??0),wins:Number(r.wins??0),tournaments:Number(r.tournaments??0),is_active:r.is_active!==false})):[])}
+    if (!session?.access_token) return;
+    setMessage("LOADING...");
+    const a = await api("/rest/v1/rpc/get_account_session", {
+      method: "POST",
+      body: JSON.stringify({ p_access_token: session.access_token })
+    });
+    if (!a.ok) throw new Error(await a.text());
+    const account = await a.json();
+    if (!account?.is_admin) { setAuthorized(false); setMessage("ADMIN ACCESS REQUIRED."); return; }
+    setAuthorized(true);
+    const [tr, pr] = await Promise.all([
+      api("/rest/v1/tournaments?select=*&order=tournament_date.asc", {}, session.access_token),
+      api("/rest/v1/players?select=*&order=name.asc", {}, session.access_token),
+    ]);
+    if (tr.ok) {
+      const rows = await tr.json();
+      setTournaments(Array.isArray(rows) ? rows.map((r:any)=>({
+        id:String(r.id), name:String(r.name??""), date:dateOut(r.tournament_date??r.date),
+        location:String(r.location??""), status:(String(r.status??"UPCOMING") as Status),
+        format:(String(r.format??r.tournament_format??r.tournament_type??"3ON3").toUpperCase().includes("TEAM")?"TEAM":"3ON3")
+      })) : []);
+    }
+    if (pr.ok) {
+      const rows = await pr.json();
+      setPlayers(Array.isArray(rows) ? rows.map((r:any)=>({
+        id:String(r.id), name:String(r.name??"PLAYER"), nickname:r.nickname==null?null:String(r.nickname),
+        points:Number(r.points??0), wins:Number(r.wins??0), tournaments:Number(r.tournaments??0), is_active:r.is_active!==false
+      })) : []);
+    }
     setMessage("");
   };
-  useEffect(() => { if (session) loadAll().catch(e => { setAuthorized(false); setMessage(errText(e)); }); }, [session]);
+
+  const persistSession = (next: Session) => {
+    setSession(next);
+    localStorage.setItem("midnight_session", JSON.stringify(next));
+    return next;
+  };
+
+  const refreshSession = async (current: Session) => {
+    try {
+      const response = await api("/rest/v1/rpc/get_account_session", {
+        method: "POST",
+        body: JSON.stringify({ p_access_token: current.access_token })
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      if (!data?.user_id) throw new Error("SESSION EXPIRED");
+      return persistSession({
+        ...current,
+        user_id: String(data.user_id),
+        login_id: String(data.login_id ?? current.login_id),
+        display_name: String(data.display_name ?? current.display_name ?? ""),
+        player_id: data.player_id ? String(data.player_id) : null,
+        is_admin: data.is_admin === true
+      });
+    } catch (e) {
+      localStorage.removeItem("midnight_session");
+      setSession(null);
+      setAuthorized(false);
+      throw e;
+    }
+  };
+
+  useEffect(() => { if (session) { void refreshSession(session).then(() => loadAll()).catch(e => { setAuthorized(false); setMessage(errText(e)); }); } }, [session]);
+
+  useEffect(() => {
+    if (!session?.access_token || authorized !== true) return;
+    const timer = window.setInterval(() => { void refreshSession(session).then(() => loadAll()).catch(e => setMessage(errText(e))); }, 10 * 60_000);
+    const onVisible = () => { if (document.visibilityState === "visible") void refreshSession(session).catch(() => undefined); };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", onVisible); document.removeEventListener("visibilitychange", onVisible); };
+  }, [session, authorized]);
+
 
   const openTournament = async (id: string) => {
     setSelectedId(id); setLoadingDetail(true); setMessage("");
     try {
       const [rr, cr, tr] = await Promise.all([
-        api(`/rest/v1/tournament_results?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`, {}),
-        api(`/rest/v1/custom_registrations?select=*&tournament_id=eq.${enc(id)}`, {}),
-        api(`/rest/v1/teams?select=*&tournament_id=eq.${enc(id)}`, {}),
+        api(`/rest/v1/tournament_results?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`, {}, session?.access_token),
+        api(`/rest/v1/custom_registrations?select=*&tournament_id=eq.${enc(id)}`, {}, session?.access_token),
+        api(`/rest/v1/teams?select=*&tournament_id=eq.${enc(id)}`, {}, session?.access_token),
       ]);
       const rrows = rr.ok ? await rr.json() : [];
       const crows = cr.ok ? await cr.json() : [];
@@ -129,7 +164,7 @@ export default function AdminPage() {
       if (Array.isArray(trows)) {
         const ids=trows.map((r:any)=>String(r.id)).filter(Boolean);
         let members:any[]=[];
-        if(ids.length){ const mr=await api(`/rest/v1/team_members?select=*&team_id=in.(${ids.map(enc).join(",")})`,{}); if(mr.ok) members=await mr.json(); }
+        if(ids.length){ const mr=await api(`/rest/v1/team_members?select=*&team_id=in.(${ids.map(enc).join(",")})`,{},session?.access_token); if(mr.ok) members=await mr.json(); }
         const loadedTeams = trows.map((r:any)=>({
           id:r.id,
           name:String(r.name??r.team_name??"TEAM"),
@@ -175,20 +210,31 @@ export default function AdminPage() {
   const addCustom=()=>setCustoms(v=>[...v,{id:uid(),label:"CUSTOM",value:""}]);
 
   const save = async () => {
-    if(!session?.access_token||!selected)return; setSaving(true);setMessage("SAVING...");
-    try{await rpc("admin_save_tournament_bundle",{p_access_token:session.access_token,p_tournament:{id:selected.id,name:selected.name,tournament_date:dateIn(selected.date),location:selected.location,status:selected.status,format:selected.format},p_results:results.filter(r=>r.player_id).map(r=>({rank:r.rank,player_id:r.player_id,bey1:r.bey1,bey2:r.bey2,bey3:r.bey3,points:r.rank===1?3:r.rank===2?2:1})),p_teams:teams.filter(t=>t.name.trim()||t.members.some(Boolean)).map(t=>({rank:t.rank,name:t.name,members:t.members.filter(Boolean).slice(0,3)})),p_customs:customs.filter(c=>c.label.trim()||c.value.trim()).map(c=>({label:c.label,value:c.value}))});setMessage("SAVED BOTH 3ON3 + TEAM BATTLE.");await loadAll();await openTournament(selected.id);}catch(e){setMessage(errText(e))}finally{setSaving(false)}
-  };
-  const createPlayer = async () => {
-    if(!session?.access_token) return;
-    const name=window.prompt("PLAYER NAME");
-    if(!name?.trim()) return;
-    const nickname=window.prompt("NICKNAME (optional)") ?? "";
-    setSaving(true); setMessage("CREATING PLAYER...");
+    if(!session?.access_token || !selected) return;
+    setSaving(true); setMessage("SAVING...");
     try {
-      const created=await rpc("admin_create_player",{p_access_token:session.access_token,p_name:name.trim(),p_nickname:nickname.trim()});
-      setPlayers(v=>[...v,{id:String(created.id),name:String(created.name||name.trim()),nickname:created.nickname||nickname.trim(),points:0,wins:0,tournaments:0,is_active:true}]);
-      setMessage("PLAYER CREATED.");
-    } catch(e){setMessage(errText(e));} finally{setSaving(false);}
+      const payload = {
+        p_access_token: session.access_token,
+        p_tournament: {
+          id: selected.id, name: selected.name, tournament_date: dateIn(selected.date),
+          location: selected.location, status: selected.status, format: selected.format
+        },
+        p_results: results.filter(r=>r.player_id).map(r=>({
+          rank:r.rank, player_id:r.player_id, bey1:r.bey1, bey2:r.bey2, bey3:r.bey3
+        })),
+        p_teams: teams.filter(t=>t.name.trim() || t.members.some(Boolean)).map(t=>({
+          name:t.name, rank:t.rank, members:t.members.filter(Boolean).slice(0,3)
+        })),
+        p_customs: customs.filter(c=>c.label.trim() || c.value.trim()).map(c=>({label:c.label,value:c.value}))
+      };
+      const r = await api("/rest/v1/rpc/admin_save_tournament_bundle", {
+        method:"POST", body:JSON.stringify(payload)
+      }, session.access_token);
+      if(!r.ok) throw new Error(`SAVE FAILED: ${await r.text()}`);
+      setMessage("SAVED. POINTS RECALCULATED.");
+      await loadAll();
+      await openTournament(selected.id);
+    } catch(e){ setMessage(errText(e)); } finally { setSaving(false); }
   };
 
   const sortedPlayers=useMemo(()=>[...players].sort((a,b)=>(b.points??0)-(a.points??0)),[players]);
@@ -228,7 +274,7 @@ export default function AdminPage() {
         <div className="saveBar"><span className={message.includes("FAILED")||message.includes("ERROR")?"error":"ok"}>{loadingDetail?"LOADING...":message}</span><button className="save" onClick={save} disabled={saving}>{saving?"SAVING...":"SAVE TO DATABASE"}</button></div>
       </>}</section>
     </div>}
-    {tab==="players" && <section className="panel"><div className="sectionTitle"><span>THE NUMBERS</span><h2>PLAYERS / RANKING</h2><button className="add playerAdd" onClick={createPlayer}>+ ADD PLAYER</button></div>{sortedPlayers.length===0?<div className="empty">NO DATA</div>:<div className="playerList">{sortedPlayers.map((p,i)=><div className="player" key={p.id}><div className="rank">{String(i+1).padStart(2,"0")}</div><div><label>PLAYER</label><input value={p.name} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/></div><div><label>NICKNAME</label><input value={p.nickname??""} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,nickname:e.target.value}:x))}/></div><div className="stat"><span>PTS</span><strong>{p.points??0}</strong></div><div className="stat"><span>WINS</span><strong>{p.wins??0}</strong></div><div className="stat"><span>EVENTS</span><strong>{p.tournaments??0}</strong></div></div>)}</div>}<div className="saveArea"><span className="saved">POINTS ARE CALCULATED AUTOMATICALLY · 3 / 2 / 1 · TEAM 2 / 1</span><button className="save" onClick={async()=>{setSaving(true);try{for(const p of players){await rpc("admin_update_player",{p_access_token:session?.access_token,p_player_id:p.id,p_name:p.name,p_nickname:p.nickname??"",p_points:Number(p.points??0)})}setMessage("PLAYERS SAVED.")}catch(e){setMessage(errText(e))}finally{setSaving(false)}}} disabled={saving}>{saving?"SAVING...":"SAVE PLAYERS"}</button></div></section>}
+    {tab==="players" && <section className="panel"><div className="sectionTitle"><span>THE NUMBERS</span><h2>PLAYERS / RANKING</h2></div>{sortedPlayers.length===0?<div className="empty">NO DATA</div>:<div className="playerList">{sortedPlayers.map((p,i)=><div className="player" key={p.id}><div className="rank">{String(i+1).padStart(2,"0")}</div><div><label>PLAYER</label><input value={p.name} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/></div><div><label>NICKNAME</label><input value={p.nickname??""} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,nickname:e.target.value}:x))}/></div><div className="stat"><span>PTS</span><strong>{p.points??0}</strong></div><div className="stat"><span>WINS</span><strong>{p.wins??0}</strong></div><div className="stat"><span>EVENTS</span><strong>{p.tournaments??0}</strong></div></div>)}</div>}<div className="saveArea"><span className="saved">CUMULATIVE POINTS · 3 / 2 / 1 · TEAM 2 / 1</span><button className="save" onClick={async()=>{setSaving(true);try{for(const p of players){const r=await api("/rest/v1/rpc/admin_update_player",{method:"POST",body:JSON.stringify({p_access_token:session?.access_token,p_player_id:p.id,p_name:p.name,p_nickname:p.nickname??"",p_points:Number(p.points??0)})},session?.access_token);if(!r.ok)throw new Error(await r.text())}setMessage("PLAYERS SAVED.")}catch(e){setMessage(errText(e))}finally{setSaving(false)}}} disabled={saving}>{saving?"SAVING...":"SAVE PLAYERS"}</button></div></section>}
     <style jsx global>{styles}</style>
   </main>;
 }
@@ -236,5 +282,5 @@ export default function AdminPage() {
 function Field({label,children}:{label:string;children:React.ReactNode}){return <label className="field">{label}{children}</label>}
 
 const styles=`
-*{box-sizing:border-box}html,body{margin:0;background:#08060d;color:#f4f1f8;font-family:Arial,Helvetica,sans-serif}button,input,select{font:inherit}.admin{min-height:100vh;padding:55px 5vw;background:radial-gradient(circle at 75% 0,rgba(111,55,190,.16),transparent 34%),#08060d}.adminHeader{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:1px solid #292331;padding-bottom:30px}.eyebrow,.sectionTitle span{font-size:10px;letter-spacing:4px;color:#a99ab9}.adminHeader h1{font-size:72px;line-height:.9;margin:12px 0 8px;letter-spacing:-4px}.adminHeader p{margin:0;color:#8d8398;font-size:10px;letter-spacing:3px}.back{color:#f4f1f8;text-decoration:none;border:1px solid #40364d;padding:14px 18px;font-size:10px;letter-spacing:2px}.tabs{display:flex;gap:10px;margin:28px 0}.tabs button{border:1px solid #292331;background:#0d0a12;color:#8d8398;padding:13px 18px;font-size:10px;letter-spacing:2px;cursor:pointer}.tabs button.active{color:#fff;border-color:#9d6cff;background:#171020}.tabs .new{margin-left:auto;color:#fff;border-color:#9d6cff}.workspace{display:grid;grid-template-columns:310px 1fr;gap:18px}.list,.editor,.panel{border:1px solid #292331;background:#0c0912}.list{padding:16px;align-self:start}.listHead{display:flex;justify-content:space-between;padding:10px 8px 16px;color:#77717f;font-size:10px;letter-spacing:3px}.listHead strong{color:#9d6cff}.event{position:relative;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-bottom-color:#292331;color:#fff;padding:18px 12px;cursor:pointer}.event.active{background:#171020;border-color:#9d6cff}.event span{display:block;color:#77717f;font-size:8px;letter-spacing:2px}.event strong{display:block;margin:8px 0 5px;font-size:13px}.event small{color:#77717f;font-size:9px}.event em{position:absolute;right:12px;top:18px;color:#9d6cff;font-size:8px;font-style:normal;letter-spacing:1px}.editor{padding:34px}.editorHead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #292331;padding-bottom:25px;margin-bottom:25px}.editorHead h2{font-size:34px;margin:10px 0 0;letter-spacing:-1px}.formatBadge{border:1px solid #9d6cff;color:#c9b6ff;padding:10px 12px;font-size:9px;letter-spacing:2px}.grid{display:grid;gap:14px;margin-bottom:4px}.grid.three{grid-template-columns:2fr 1fr 1fr}.grid.two{grid-template-columns:1fr 1fr}.field{display:block;color:#80758e;font-size:9px;letter-spacing:2px;margin-bottom:14px}.field input,.field select,.customRow input,.teamTop input,.teamTop select,.members select, .members select option{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.field input:focus,.field select:focus,input:focus,select:focus{border-color:#9d6cff}.resultSection{border-top:1px solid #292331;padding-top:30px;margin-top:30px}.resultSection+.resultSection{margin-top:34px}.resultSection h3{letter-spacing:-.5px}.sectionTitle h3{margin:8px 0 5px;font-size:27px}.sectionTitle p{margin:0 0 18px;color:#665d70;font-size:9px;letter-spacing:2px}.resultRow{display:grid;grid-template-columns:65px 1.3fr 1fr 1fr 1fr 34px;gap:10px;align-items:end;border-bottom:1px solid #201b27;padding:18px 0}.place{font-size:26px;color:#9d6cff;padding-bottom:18px}.place small{display:block;font-size:8px;color:#77717f;letter-spacing:1px;margin-top:3px}.remove{border:1px solid #392f44;background:transparent;color:#9a8da5;height:39px;cursor:pointer}.remove:hover{border-color:#ff6b81;color:#ff6b81}.add{border:1px dashed #493b55;background:transparent;color:#9d6cff;padding:13px 17px;margin-top:15px;cursor:pointer;font-size:9px;letter-spacing:2px}.fixedNote{margin-top:15px;color:#5f576b;font-size:8px;letter-spacing:2px}.teamEditor{border:1px solid #292331;padding:18px;margin-bottom:12px}.teamTop{display:grid;grid-template-columns:100px 80px 1fr 34px;gap:10px;align-items:center}.teamTop strong{color:#9d6cff;font-size:11px;letter-spacing:1px}.members{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.customRow{display:grid;grid-template-columns:180px 1fr 34px;gap:10px;margin-bottom:10px}.labelInput{max-width:180px}.saveBar,.saveArea{display:flex;justify-content:flex-end;align-items:center;gap:18px;margin-top:30px}.ok,.saved{color:#9d6cff;font-size:10px;letter-spacing:2px}.error{color:#ff6b81;font-size:10px;letter-spacing:1px;max-width:70%}.save{border:0;background:#f4f1f8;color:#08060d;padding:14px 22px;font-weight:700;font-size:10px;letter-spacing:2px;cursor:pointer}.save:hover{background:#9d6cff;color:#fff}.save:disabled{opacity:.5}.panel{padding:35px}.panel .sectionTitle h2{font-size:42px;margin:8px 0 30px}.playerList{border-top:1px solid #292331}.player{display:grid;grid-template-columns:55px 2fr 2fr 90px 90px 90px;gap:14px;align-items:end;border-bottom:1px solid #292331;padding:18px 0}.player label{display:block;color:#80758e;font-size:8px;letter-spacing:2px}.rank{font-size:24px;color:#9d6cff;padding-bottom:15px}.pointsInput{width:70px;background:#08060d;border:1px solid #342b40;color:#9d6cff;padding:8px;text-align:center;font-weight:700}.stat{text-align:center;padding-bottom:14px}.stat span{display:block;color:#5f576b;font-size:8px;letter-spacing:2px}.stat strong{font-size:19px}.empty,.gate{min-height:250px;display:grid;place-items:center;align-content:center;gap:15px;color:#77717f;text-align:center;letter-spacing:3px}.empty.big{min-height:500px}.gate h1{margin:0;font-size:65px}.gate p{font-size:10px}@media(max-width:1000px){.workspace{grid-template-columns:1fr}.grid.three,.grid.two,.resultRow,.members,.player{grid-template-columns:1fr}.admin{padding:35px 18px}.adminHeader{display:block}.tabs{flex-wrap:wrap}.tabs .new{margin-left:0}.editor{padding:22px}.teamTop,.customRow{grid-template-columns:1fr}.labelInput{max-width:none}.saveBar,.saveArea{display:block}.save{margin-top:15px}}
+*{box-sizing:border-box}html,body{margin:0;background:#08060d;color:#f4f1f8;font-family:Arial,Helvetica,sans-serif}button,input,select{font:inherit}.admin{min-height:100vh;padding:55px 5vw;background:radial-gradient(circle at 75% 0,rgba(111,55,190,.16),transparent 34%),#08060d}.adminHeader{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:1px solid #292331;padding-bottom:30px}.eyebrow,.sectionTitle span{font-size:10px;letter-spacing:4px;color:#a99ab9}.adminHeader h1{font-size:72px;line-height:.9;margin:12px 0 8px;letter-spacing:-4px}.adminHeader p{margin:0;color:#8d8398;font-size:10px;letter-spacing:3px}.back{color:#f4f1f8;text-decoration:none;border:1px solid #40364d;padding:14px 18px;font-size:10px;letter-spacing:2px}.tabs{display:flex;gap:10px;margin:28px 0}.tabs button{border:1px solid #292331;background:#0d0a12;color:#8d8398;padding:13px 18px;font-size:10px;letter-spacing:2px;cursor:pointer}.tabs button.active{color:#fff;border-color:#9d6cff;background:#171020}.tabs .new{margin-left:auto;color:#fff;border-color:#9d6cff}.workspace{display:grid;grid-template-columns:310px 1fr;gap:18px}.list,.editor,.panel{border:1px solid #292331;background:#0c0912}.list{padding:16px;align-self:start}.listHead{display:flex;justify-content:space-between;padding:10px 8px 16px;color:#77717f;font-size:10px;letter-spacing:3px}.listHead strong{color:#9d6cff}.event{position:relative;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-bottom-color:#292331;color:#fff;padding:18px 12px;cursor:pointer}.event.active{background:#171020;border-color:#9d6cff}.event span{display:block;color:#77717f;font-size:8px;letter-spacing:2px}.event strong{display:block;margin:8px 0 5px;font-size:13px}.event small{color:#77717f;font-size:9px}.event em{position:absolute;right:12px;top:18px;color:#9d6cff;font-size:8px;font-style:normal;letter-spacing:1px}.editor{padding:34px}.editorHead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #292331;padding-bottom:25px;margin-bottom:25px}.editorHead h2{font-size:34px;margin:10px 0 0;letter-spacing:-1px}.formatBadge{border:1px solid #9d6cff;color:#c9b6ff;padding:10px 12px;font-size:9px;letter-spacing:2px}.grid{display:grid;gap:14px;margin-bottom:4px}.grid.three{grid-template-columns:2fr 1fr 1fr}.grid.two{grid-template-columns:1fr 1fr}.field{display:block;color:#80758e;font-size:9px;letter-spacing:2px;margin-bottom:14px}.field input,.field select,.customRow input,.teamTop input,.teamTop select,.members select{display:block;width:100%;margin-top:7px;background:#08060d;border:1px solid #342b40;color:#fff;padding:12px;outline:0}.field input:focus,.field select:focus,input:focus,select:focus{border-color:#9d6cff}.resultSection{border-top:1px solid #292331;padding-top:30px;margin-top:30px}.resultSection+.resultSection{margin-top:34px}.resultSection h3{letter-spacing:-.5px}.sectionTitle h3{margin:8px 0 5px;font-size:27px}.sectionTitle p{margin:0 0 18px;color:#665d70;font-size:9px;letter-spacing:2px}.resultRow{display:grid;grid-template-columns:65px 1.3fr 1fr 1fr 1fr 34px;gap:10px;align-items:end;border-bottom:1px solid #201b27;padding:18px 0}.place{font-size:26px;color:#9d6cff;padding-bottom:18px}.place small{display:block;font-size:8px;color:#77717f;letter-spacing:1px;margin-top:3px}.remove{border:1px solid #392f44;background:transparent;color:#9a8da5;height:39px;cursor:pointer}.remove:hover{border-color:#ff6b81;color:#ff6b81}.add{border:1px dashed #493b55;background:transparent;color:#9d6cff;padding:13px 17px;margin-top:15px;cursor:pointer;font-size:9px;letter-spacing:2px}.fixedNote{margin-top:15px;color:#5f576b;font-size:8px;letter-spacing:2px}.teamEditor{border:1px solid #292331;padding:18px;margin-bottom:12px}.teamTop{display:grid;grid-template-columns:100px 80px 1fr 34px;gap:10px;align-items:center}.teamTop strong{color:#9d6cff;font-size:11px;letter-spacing:1px}.members{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.customRow{display:grid;grid-template-columns:180px 1fr 34px;gap:10px;margin-bottom:10px}.labelInput{max-width:180px}.saveBar,.saveArea{display:flex;justify-content:flex-end;align-items:center;gap:18px;margin-top:30px}.ok,.saved{color:#9d6cff;font-size:10px;letter-spacing:2px}.error{color:#ff6b81;font-size:10px;letter-spacing:1px;max-width:70%}.save{border:0;background:#f4f1f8;color:#08060d;padding:14px 22px;font-weight:700;font-size:10px;letter-spacing:2px;cursor:pointer}.save:hover{background:#9d6cff;color:#fff}.save:disabled{opacity:.5}.panel{padding:35px}.panel .sectionTitle h2{font-size:42px;margin:8px 0 30px}.playerList{border-top:1px solid #292331}.player{display:grid;grid-template-columns:55px 2fr 2fr 90px 90px 90px;gap:14px;align-items:end;border-bottom:1px solid #292331;padding:18px 0}.player label{display:block;color:#80758e;font-size:8px;letter-spacing:2px}.rank{font-size:24px;color:#9d6cff;padding-bottom:15px}.stat{text-align:center;padding-bottom:14px}.stat span{display:block;color:#5f576b;font-size:8px;letter-spacing:2px}.stat strong{font-size:19px}.empty,.gate{min-height:250px;display:grid;place-items:center;align-content:center;gap:15px;color:#77717f;text-align:center;letter-spacing:3px}.empty.big{min-height:500px}.gate h1{margin:0;font-size:65px}.gate p{font-size:10px}@media(max-width:1000px){.workspace{grid-template-columns:1fr}.grid.three,.grid.two,.resultRow,.members,.player{grid-template-columns:1fr}.admin{padding:35px 18px}.adminHeader{display:block}.tabs{flex-wrap:wrap}.tabs .new{margin-left:0}.editor{padding:22px}.teamTop,.customRow{grid-template-columns:1fr}.labelInput{max-width:none}.saveBar,.saveArea{display:block}.save{margin-top:15px}}
 `;

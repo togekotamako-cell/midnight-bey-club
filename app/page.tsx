@@ -29,11 +29,11 @@ type ResultRow = Record<string, unknown>;
 
 type Session = {
   access_token: string;
-  user_id: string;
-  login_id: string;
-  display_name?: string;
-  player_id?: string | null;
-  is_admin?: boolean;
+  refresh_token?: string;
+  user?: {
+    id: string;
+    email?: string;
+  };
 };
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -77,7 +77,11 @@ function apiHeaders(accessToken?: string) {
   };
 }
 
-async function supabaseFetch(path: string, init: RequestInit = {}) {
+async function supabaseFetch(
+  path: string,
+  init: RequestInit = {},
+  accessToken?: string
+) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error("Supabase environment variables are missing.");
   }
@@ -85,47 +89,11 @@ async function supabaseFetch(path: string, init: RequestInit = {}) {
   return fetch(`${SUPABASE_URL}${path}`, {
     ...init,
     headers: {
-      ...apiHeaders(),
+      ...apiHeaders(accessToken),
       ...(init.headers || {}),
     },
     cache: "no-store",
   });
-}
-
-async function rpc(name: string, body: Record<string, unknown>) {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    throw new Error("Supabase environment variables are missing.");
-  }
-
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-
-  const text = await response.text();
-  let data: unknown = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text;
-  }
-
-  if (!response.ok) {
-    const message =
-      typeof data === "object" && data !== null
-        ? String((data as Record<string, unknown>).message ?? (data as Record<string, unknown>).error ?? "REQUEST FAILED.")
-        : String(data || "REQUEST FAILED.");
-    throw new Error(message);
-  }
-
-  return data as Record<string, unknown> | null;
 }
 
 function displayDate(value: unknown) {
@@ -343,106 +311,25 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
-  const [accountIsAdmin, setAccountIsAdmin] = useState(false);
   const [accountMessage, setAccountMessage] = useState("");
   const [accountLoading, setAccountLoading] = useState(false);
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
-  const persistSession = (nextSession: Session) => {
-    setSession(nextSession);
-    window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
-    return nextSession;
-  };
-
-  const clearStoredSession = () => {
-    setSession(null);
-    setAccountIsAdmin(false);
-    setSelectedPlayerId("");
-    window.localStorage.removeItem("midnight_session");
-  };
-
-  const refreshSession = async (current: Session) => {
-    if (!current.access_token || !current.user_id) return null;
-    try {
-      const data = await rpc("get_account_session", {
-        p_access_token: current.access_token,
-      });
-      if (!data?.user_id) throw new Error("SESSION EXPIRED");
-
-      return persistSession({
-        ...current,
-        display_name: String(data.display_name ?? current.display_name ?? ""),
-        player_id: data.player_id ? String(data.player_id) : null,
-        is_admin: data.is_admin === true,
-        login_id: String(data.login_id ?? current.login_id),
-      });
-    } catch (error) {
-      console.warn("Session refresh failed.", error);
-      clearStoredSession();
-      return null;
-    }
-  };
-
   useEffect(() => {
-    const saved = window.localStorage.getItem("midnight_session");
-    if (!saved) return;
+    const saved =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("midnight_session")
+        : null;
 
-    try {
-      const parsed = JSON.parse(saved) as Session;
-      if (!parsed?.access_token || !parsed?.user_id || !parsed?.login_id) {
-        throw new Error("INVALID SESSION");
+    if (saved) {
+      try {
+        setSession(JSON.parse(saved));
+      } catch {
+        window.localStorage.removeItem("midnight_session");
       }
-      setSession(parsed);
-      void refreshSession(parsed);
-    } catch {
-      clearStoredSession();
     }
   }, []);
-
-  useEffect(() => {
-    if (!session?.access_token) return;
-
-    // Custom ID/password sessions are opaque tokens, not JWTs.
-    // get_account_session both validates the token and extends its 30-day expiry.
-    const refreshTimer = window.setInterval(() => {
-      void refreshSession(session);
-    }, 10 * 60_000);
-
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") {
-        void refreshSession(session);
-      }
-    };
-
-    window.addEventListener("focus", refreshWhenVisible);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-
-    return () => {
-      window.clearInterval(refreshTimer);
-      window.removeEventListener("focus", refreshWhenVisible);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-    };
-  }, [session]);
-
-  const loadAccountProfile = async (current: Session) => {
-    try {
-      const data = await rpc("get_account_session", {
-        p_access_token: current.access_token,
-      });
-      if (!data?.user_id) return;
-      setAccountIsAdmin(data.is_admin === true);
-      setSelectedPlayerId(data.player_id ? String(data.player_id) : "");
-      if (data.display_name) setDisplayName(String(data.display_name));
-    } catch (error) {
-      console.warn("Account profile could not be loaded.", error);
-    }
-  };
-  useEffect(() => {
-    if (session?.access_token) {
-      void loadAccountProfile(session);
-    }
-  }, [session]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -450,7 +337,7 @@ export default function Home() {
 
       try {
         const tournamentResponse = await supabaseFetch(
-          "/rest/v1/tournaments?select=*&order=tournament_date.asc"
+          "/rest/v1/tournaments?select=id,name,tournament_date,location,status&order=tournament_date.asc"
         );
 
         if (tournamentResponse.ok) {
@@ -478,7 +365,7 @@ export default function Home() {
               "/rest/v1/player_total_points?select=*"
             ),
             supabaseFetch(
-              "/rest/v1/players?select=*&order=name.asc"
+              "/rest/v1/players?select=id,name,nickname,is_active&order=name.asc"
             ),
           ]);
 
@@ -511,14 +398,7 @@ export default function Home() {
       }
     };
 
-    void loadData();
-
-    // Keep public tournament/ranking data fresh without a manual reload.
-    const refreshTimer = window.setInterval(() => {
-      void loadData();
-    }, 30_000);
-
-    return () => window.clearInterval(refreshTimer);
+    loadData();
   }, []);
 
   const openTournament = async (tournament: Tournament) => {
@@ -627,15 +507,18 @@ export default function Home() {
     (t) => t.status === "FINISHED"
   ).length;
 
-  const signUp = async () => {
-    const id = loginId.trim();
-    const name = displayName.trim();
+  // Supabase Auth itself uses email internally, but the public UI uses ID only.
+  // The synthetic address is never shown to members.
+  const accountEmail = (id: string) =>
+    `${id.trim().toLowerCase()}@id.midnightbey.club`;
 
-    if (!id || !password || !name) {
-      setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED.");
+  const signUp = async () => {
+    if (!loginId.trim() || !password) {
+      setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
       return;
     }
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) {
+
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(loginId.trim())) {
       setAccountMessage("ID MUST BE 3-32 CHARACTERS.");
       return;
     }
@@ -644,46 +527,54 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const data = await rpc("register_account", {
-        p_login_id: id,
-        p_password: password,
-        p_display_name: name,
-      });
+      const response = await fetch(
+        `${SUPABASE_URL}/auth/v1/signup`,
+        {
+          method: "POST",
+          headers: apiHeaders(),
+          body: JSON.stringify({
+            email: accountEmail(loginId),
+            password,
+            data: {
+              login_id: loginId.trim(),
+              display_name: displayName.trim(),
+            },
+          }),
+        }
+      );
 
-      if (!data?.access_token || !data?.user_id) {
-        throw new Error("ACCOUNT CREATION FAILED.");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.msg || data?.message || "SIGN UP FAILED.");
       }
 
-      const createdSession = persistSession({
-        access_token: String(data.access_token),
-        user_id: String(data.user_id),
-        login_id: String(data.login_id ?? id),
-        display_name: String(data.display_name ?? name),
-        player_id: data.player_id ? String(data.player_id) : null,
-        is_admin: data.is_admin === true,
-      });
-
-      const player = await rpc("create_player_for_account", {
-        p_access_token: createdSession.access_token,
-        p_name: name,
-        p_nickname: name,
-      });
-
-      if (player?.player_id) {
-        persistSession({ ...createdSession, player_id: String(player.player_id) });
-        setSelectedPlayerId(String(player.player_id));
+      if (data?.access_token) {
+        const nextSession: Session = data;
+        setSession(nextSession);
+        window.localStorage.setItem(
+          "midnight_session",
+          JSON.stringify(nextSession)
+        );
+        await syncAccount(nextSession.access_token, data.user?.id, loginId.trim(), displayName.trim());
       }
 
-      setAccountMessage("ACCOUNT CREATED. PLAYER PROFILE CREATED.");
+      setAccountMessage(
+        data?.access_token
+          ? "ACCOUNT CREATED."
+          : "ACCOUNT CREATED. EMAIL CONFIRMATION MUST BE DISABLED FOR ID LOGIN."
+      );
     } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "SIGN UP FAILED.");
+      setAccountMessage(
+        error instanceof Error ? error.message : "SIGN UP FAILED."
+      );
     } finally {
       setAccountLoading(false);
     }
   };
+
   const login = async () => {
-    const id = loginId.trim();
-    if (!id || !password) {
+    if (!loginId.trim() || !password) {
       setAccountMessage("ID AND PASSWORD ARE REQUIRED.");
       return;
     }
@@ -692,33 +583,80 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const data = await rpc("login_account", {
-        p_login_id: id,
-        p_password: password,
-      });
+      // ID + PASSWORD login uses the custom Supabase RPC.
+      // Do not send the ID through Supabase Auth as a synthetic email.
+      const response = await fetch(
+        `${SUPABASE_URL}/rest/v1/rpc/login_account`,
+        {
+          method: "POST",
+          headers: apiHeaders(),
+          body: JSON.stringify({
+            p_login_id: loginId.trim(),
+            p_password: password,
+          }),
+          cache: "no-store",
+        }
+      );
 
-      if (!data?.access_token || !data?.user_id) {
-        throw new Error("LOGIN FAILED.");
+      const data = await response.json();
+
+      if (!response.ok || !data?.access_token || !data?.user_id) {
+        let message = data?.message || data?.hint || data?.details || "LOGIN FAILED.";
+        if (typeof message === "object") message = JSON.stringify(message);
+        throw new Error(String(message));
       }
 
-      persistSession({
-        access_token: String(data.access_token),
-        user_id: String(data.user_id),
-        login_id: String(data.login_id ?? id),
-        display_name: String(data.display_name ?? ""),
-        player_id: data.player_id ? String(data.player_id) : null,
-        is_admin: data.is_admin === true,
-      });
+      const nextSession: Session = {
+        access_token: data.access_token,
+        user: { id: String(data.user_id) },
+      };
+
+      setSession(nextSession);
+      window.localStorage.setItem(
+        "midnight_session",
+        JSON.stringify(nextSession)
+      );
 
       setAccountMessage("LOGGED IN.");
     } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "LOGIN FAILED.");
+      setAccountMessage(
+        error instanceof Error ? error.message : "LOGIN FAILED."
+      );
     } finally {
       setAccountLoading(false);
     }
   };
+
+  const syncAccount = async (
+    accessToken: string,
+    userId?: string,
+    id?: string,
+    name?: string
+  ) => {
+    if (!userId) return;
+
+    const accountResponse = await supabaseFetch(
+      "/rest/v1/accounts?on_conflict=id",
+      {
+        method: "POST",
+        headers: {
+          Prefer: "resolution=merge-duplicates,return=minimal",
+        },
+        body: JSON.stringify({
+          id: userId,
+          display_name: name || id || "PLAYER",
+        }),
+      },
+      accessToken
+    );
+
+    if (!accountResponse.ok) {
+      console.warn("Account row could not be synced.");
+    }
+  };
+
   const linkPlayer = async () => {
-    if (!session?.access_token || !selectedPlayerId) {
+    if (!session?.access_token || !session.user?.id || !selectedPlayerId) {
       setAccountMessage("SELECT YOUR PLAYER.");
       return;
     }
@@ -727,58 +665,72 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      await rpc("link_player_account", {
-        p_access_token: session.access_token,
-        p_player_id: selectedPlayerId,
-      });
-      persistSession({ ...session, player_id: selectedPlayerId });
-      setAccountMessage("PLAYER LINKED.");
+      const response = await supabaseFetch(
+        "/rest/v1/player_account_links",
+        {
+          method: "POST",
+          headers: {
+            Prefer: "resolution=merge-duplicates,return=minimal",
+          },
+          body: JSON.stringify({
+            user_id: session.user.id,
+            player_id: selectedPlayerId,
+            status: "pending",
+          }),
+        },
+        session.access_token
+      );
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(body || "PLAYER LINK FAILED.");
+      }
+
+      setAccountMessage("PLAYER LINK REQUEST SENT.");
     } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "PLAYER LINK FAILED.");
+      setAccountMessage(
+        error instanceof Error ? error.message : "PLAYER LINK FAILED."
+      );
     } finally {
       setAccountLoading(false);
     }
   };
-  const logout = async () => {
-    const token = session?.access_token;
-    clearStoredSession();
-    setLoginId("");
-    setPassword("");
+
+  const logout = () => {
+    setSession(null);
+    window.localStorage.removeItem("midnight_session");
     setAccountMessage("LOGGED OUT.");
-    if (token) {
-      try {
-        await rpc("logout_account", { p_access_token: token });
-      } catch {
-        // Local logout is already complete.
-      }
-    }
   };
+
   const openAdmin = async () => {
-    if (!session?.access_token) {
+    if (!session?.access_token || !session.user?.id) {
       setAccountMessage("LOGIN REQUIRED.");
       return;
     }
 
-    setAccountLoading(true);
-    setAccountMessage("");
-
     try {
-      const data = await rpc("get_account_session", {
-        p_access_token: session.access_token,
-      });
-      const isAdmin = data?.is_admin === true;
-      setAccountIsAdmin(isAdmin);
-      if (!isAdmin) {
-        setAccountMessage("ADMIN ACCESS REQUIRED.");
+      const response = await supabaseFetch(
+        `/rest/v1/accounts?select=is_admin&limit=1&id=eq.${encodeURIComponent(session.user.id)}`,
+        {},
+        session.access_token
+      );
+
+      if (!response.ok) {
+        setAccountMessage("ADMIN CHECK FAILED.");
         return;
       }
-      window.location.href = "/admin";
-    } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "ADMIN CHECK FAILED.");
-    } finally {
-      setAccountLoading(false);
+
+      const rows = await response.json();
+      if (rows?.[0]?.is_admin === true) {
+        window.location.href = "/admin";
+      } else {
+        setAccountMessage("ADMIN ACCESS REQUIRED.");
+      }
+    } catch {
+      setAccountMessage("ADMIN CHECK FAILED.");
     }
   };
+
   const resultRowsSorted = useMemo(
     () =>
       [...resultRows].sort((a, b) => {
@@ -954,7 +906,7 @@ export default function Home() {
             <p className="eyebrow">THE NUMBERS</p>
             <h2>RANKING</h2>
           </div>
-          <span className="section-number">08</span>
+          <span className="section-number">02</span>
         </div>
 
         {rankingLoading ? (
@@ -992,7 +944,7 @@ export default function Home() {
 
             <div className="ranking-note">
               <span>CUMULATIVE POINTS</span>
-              <span>1ST 3PT / 2ND 2PT / 3RD 1PT · TEAM 2PT / 1PT</span>
+              <span>1ST 3PT / 2ND 2PT / 3RD 1PT</span>
             </div>
           </>
         )}
@@ -1014,7 +966,7 @@ export default function Home() {
         <div className="history-content">
           <div className="history-big">
             <span>2026</span>
-            <strong>08</strong>
+            <strong>{String(historyCount).padStart(2, "0")}</strong>
           </div>
 
           <div className="history-text">
@@ -1113,7 +1065,7 @@ export default function Home() {
                 </div>
 
                 <div className="detail-block">
-                  <div className="detail-title">3ON3 RESULTS / INDIVIDUAL · 3 BEYS</div>
+                  <div className="detail-title">RESULTS</div>
 
                   {resultRowsSorted.length === 0 ? (
                     <div className="detail-no-data">NO DATA</div>
@@ -1184,9 +1136,9 @@ export default function Home() {
                   )}
                 </div>
 
-                {teamRows.length > 0 && (
+                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
                   <div className="detail-block">
-                    <div className="detail-title">TEAM BATTLE RESULTS · 2 PT / 1 PT</div>
+                    <div className="detail-title">TEAM RESULTS</div>
                     <div className="team-list">
                       {teamRows.map((team, index) => {
                         const teamId = String(team.id ?? "");
@@ -1287,8 +1239,7 @@ export default function Home() {
               <>
                 <h2>ACCOUNT</h2>
                 <p className="account-email">
-                  ID / {loginId || "SIGNED IN"}
-                  {accountIsAdmin ? " / ADMIN" : ""}
+                  {loginId || session.user?.email || "SIGNED IN"}
                 </p>
 
                 <div className="account-block">

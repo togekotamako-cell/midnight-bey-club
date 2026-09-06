@@ -29,14 +29,11 @@ type ResultRow = Record<string, unknown>;
 
 type Session = {
   access_token: string;
-  refresh_token?: string;
-  expires_at?: number;
-  expires_in?: number;
-  token_type?: string;
-  user?: {
-    id: string;
-    email?: string;
-  };
+  user_id: string;
+  login_id: string;
+  display_name?: string;
+  player_id?: string | null;
+  is_admin?: boolean;
 };
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -72,27 +69,15 @@ const fallbackTournaments: Tournament[] = [
 const emptyPlayers: Player[] = [];
 
 function apiHeaders(accessToken?: string) {
-  const headers: Record<string, string> = {
+  const token = accessToken || SUPABASE_ANON_KEY;
+  return {
     apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-
-  // Supabase publishable keys (sb_publishable_...) are not JWTs and must
-  // NOT be sent as a Bearer token to PostgREST. Only a real user access
-  // token belongs in Authorization. This prevents PGRST301 "Expected 3
-  // parts in JWT" errors on account/player operations.
-  if (accessToken) {
-    headers.Authorization = `Bearer ${accessToken}`;
-  }
-
-  return headers;
 }
 
-async function supabaseFetch(
-  path: string,
-  init: RequestInit = {},
-  accessToken?: string
-) {
+async function supabaseFetch(path: string, init: RequestInit = {}) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error("Supabase environment variables are missing.");
   }
@@ -100,11 +85,47 @@ async function supabaseFetch(
   return fetch(`${SUPABASE_URL}${path}`, {
     ...init,
     headers: {
-      ...apiHeaders(accessToken),
+      ...apiHeaders(),
       ...(init.headers || {}),
     },
     cache: "no-store",
   });
+}
+
+async function rpc(name: string, body: Record<string, unknown>) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Supabase environment variables are missing.");
+  }
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+
+  const text = await response.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+
+  if (!response.ok) {
+    const message =
+      typeof data === "object" && data !== null
+        ? String((data as Record<string, unknown>).message ?? (data as Record<string, unknown>).error ?? "REQUEST FAILED.")
+        : String(data || "REQUEST FAILED.");
+    throw new Error(message);
+  }
+
+  return data as Record<string, unknown> | null;
 }
 
 function displayDate(value: unknown) {
@@ -328,142 +349,98 @@ export default function Home() {
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
+  const persistSession = (nextSession: Session) => {
+    setSession(nextSession);
+    window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+    return nextSession;
+  };
 
-    const saveSession = (next: Session | null) => {
-      if (cancelled) return;
-      setSession(next);
-      if (next) {
-        window.localStorage.setItem("midnight_session", JSON.stringify(next));
-      } else {
-        window.localStorage.removeItem("midnight_session");
-      }
-    };
+  const clearStoredSession = () => {
+    setSession(null);
+    setAccountIsAdmin(false);
+    setSelectedPlayerId("");
+    window.localStorage.removeItem("midnight_session");
+  };
 
-    const refreshSession = async (current: Session): Promise<Session | null> => {
-      if (!current.refresh_token) return current;
-
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
-          {
-            method: "POST",
-            headers: apiHeaders(),
-            body: JSON.stringify({ refresh_token: current.refresh_token }),
-          }
-        );
-        const data = await response.json().catch(() => null);
-
-        if (!response.ok || !data?.access_token) {
-          console.warn("SESSION REFRESH FAILED", data);
-          return null;
-        }
-
-        const next: Session = {
-          ...current,
-          ...data,
-          user: data.user ?? current.user,
-        };
-        saveSession(next);
-        return next;
-      } catch (error) {
-        console.warn("SESSION REFRESH ERROR", error);
-        return null;
-      }
-    };
-
-    const restore = async () => {
-      const saved = window.localStorage.getItem("midnight_session");
-      if (!saved) return;
-
-      try {
-        const current = JSON.parse(saved) as Session;
-        const expiresAt = Number(current.expires_at ?? 0);
-        const needsRefresh = expiresAt > 0 && expiresAt * 1000 <= Date.now() + 60_000;
-
-        if (needsRefresh) {
-          const refreshed = await refreshSession(current);
-          if (!refreshed && !cancelled) saveSession(null);
-        } else if (!cancelled) {
-          setSession(current);
-        }
-      } catch {
-        window.localStorage.removeItem("midnight_session");
-      }
-    };
-
-    restore();
-
-    // Keep the login alive automatically. Refresh roughly every 5 minutes,
-    // and also immediately when the tab becomes visible again.
-    const timer = window.setInterval(async () => {
-      const saved = window.localStorage.getItem("midnight_session");
-      if (!saved) return;
-      try {
-        const current = JSON.parse(saved) as Session;
-        const expiresAt = Number(current.expires_at ?? 0);
-        if (!expiresAt || expiresAt * 1000 <= Date.now() + 5 * 60_000) {
-          await refreshSession(current);
-        }
-      } catch {
-        window.localStorage.removeItem("midnight_session");
-      }
-    }, 5 * 60 * 1000);
-
-    const onVisibility = async () => {
-      if (document.visibilityState !== "visible") return;
-      const saved = window.localStorage.getItem("midnight_session");
-      if (!saved) return;
-      try {
-        const current = JSON.parse(saved) as Session;
-        const expiresAt = Number(current.expires_at ?? 0);
-        if (!expiresAt || expiresAt * 1000 <= Date.now() + 5 * 60_000) {
-          await refreshSession(current);
-        }
-      } catch {
-        window.localStorage.removeItem("midnight_session");
-      }
-    };
-
-    document.addEventListener("visibilitychange", onVisibility);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, []);
-
-  const loadAccountProfile = async (accessToken: string, userId: string) => {
+  const refreshSession = async (current: Session) => {
+    if (!current.access_token || !current.user_id) return null;
     try {
-      const response = await supabaseFetch(
-        `/rest/v1/accounts?select=player_id,is_admin,display_name&id=eq.${encodeURIComponent(userId)}&limit=1`,
-        {},
-        accessToken
-      );
+      const data = await rpc("get_account_session", {
+        p_access_token: current.access_token,
+      });
+      if (!data?.user_id) throw new Error("SESSION EXPIRED");
 
-      if (!response.ok) return;
-
-      const rows = await response.json();
-      const account = Array.isArray(rows) ? rows[0] : null;
-      if (!account) return;
-
-      setAccountIsAdmin(account.is_admin === true);
-      if (account.display_name && !displayName) {
-        setDisplayName(String(account.display_name));
-      }
-      if (account.player_id) {
-        setSelectedPlayerId(String(account.player_id));
-      }
+      return persistSession({
+        ...current,
+        display_name: String(data.display_name ?? current.display_name ?? ""),
+        player_id: data.player_id ? String(data.player_id) : null,
+        is_admin: data.is_admin === true,
+        login_id: String(data.login_id ?? current.login_id),
+      });
     } catch (error) {
-      console.warn("Account profile could not be loaded.", error);
+      console.warn("Session refresh failed.", error);
+      clearStoredSession();
+      return null;
     }
   };
 
   useEffect(() => {
-    if (session?.access_token && session.user?.id) {
-      loadAccountProfile(session.access_token, session.user.id);
+    const saved = window.localStorage.getItem("midnight_session");
+    if (!saved) return;
+
+    try {
+      const parsed = JSON.parse(saved) as Session;
+      if (!parsed?.access_token || !parsed?.user_id || !parsed?.login_id) {
+        throw new Error("INVALID SESSION");
+      }
+      setSession(parsed);
+      void refreshSession(parsed);
+    } catch {
+      clearStoredSession();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session?.access_token) return;
+
+    // Custom ID/password sessions are opaque tokens, not JWTs.
+    // get_account_session both validates the token and extends its 30-day expiry.
+    const refreshTimer = window.setInterval(() => {
+      void refreshSession(session);
+    }, 10 * 60_000);
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshSession(session);
+      }
+    };
+
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(refreshTimer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [session]);
+
+  const loadAccountProfile = async (current: Session) => {
+    try {
+      const data = await rpc("get_account_session", {
+        p_access_token: current.access_token,
+      });
+      if (!data?.user_id) return;
+      setAccountIsAdmin(data.is_admin === true);
+      setSelectedPlayerId(data.player_id ? String(data.player_id) : "");
+      if (data.display_name) setDisplayName(String(data.display_name));
+    } catch (error) {
+      console.warn("Account profile could not be loaded.", error);
+    }
+  };
+  useEffect(() => {
+    if (session?.access_token) {
+      void loadAccountProfile(session);
     }
   }, [session]);
 
@@ -534,7 +511,14 @@ export default function Home() {
       }
     };
 
-    loadData();
+    void loadData();
+
+    // Keep public tournament/ranking data fresh without a manual reload.
+    const refreshTimer = window.setInterval(() => {
+      void loadData();
+    }, 30_000);
+
+    return () => window.clearInterval(refreshTimer);
   }, []);
 
   const openTournament = async (tournament: Tournament) => {
@@ -643,11 +627,6 @@ export default function Home() {
     (t) => t.status === "FINISHED"
   ).length;
 
-  // Supabase Auth itself uses email internally, but the public UI uses ID only.
-  // The synthetic address is never shown to members.
-  const accountEmail = (id: string) =>
-    `${id.trim().toLowerCase()}@id.midnightbey.club`;
-
   const signUp = async () => {
     const id = loginId.trim();
     const name = displayName.trim();
@@ -656,7 +635,6 @@ export default function Home() {
       setAccountMessage("ID, DISPLAY NAME AND PASSWORD ARE REQUIRED.");
       return;
     }
-
     if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(id)) {
       setAccountMessage("ID MUST BE 3-32 CHARACTERS.");
       return;
@@ -666,74 +644,34 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({
-          email: accountEmail(id),
-          password,
-          data: {
-            login_id: id,
-            display_name: name,
-          },
-        }),
+      const data = await rpc("register_account", {
+        p_login_id: id,
+        p_password: password,
+        p_display_name: name,
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data?.msg || data?.message || data?.error_description || "SIGN UP FAILED.");
+      if (!data?.access_token || !data?.user_id) {
+        throw new Error("ACCOUNT CREATION FAILED.");
       }
 
-      if (!data?.access_token || !data?.user?.id) {
-        setAccountMessage("ACCOUNT CREATED. CONFIRMATION IS REQUIRED IN SUPABASE AUTH SETTINGS.");
-        return;
-      }
+      const createdSession = persistSession({
+        access_token: String(data.access_token),
+        user_id: String(data.user_id),
+        login_id: String(data.login_id ?? id),
+        display_name: String(data.display_name ?? name),
+        player_id: data.player_id ? String(data.player_id) : null,
+        is_admin: data.is_admin === true,
+      });
 
-      const nextSession: Session = data;
-      setSession(nextSession);
-      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+      const player = await rpc("create_player_for_account", {
+        p_access_token: createdSession.access_token,
+        p_name: name,
+        p_nickname: name,
+      });
 
-      await syncAccount(nextSession.access_token, data.user.id, id, name);
-
-      const playerResponse = await supabaseFetch(
-        "/rest/v1/players",
-        {
-          method: "POST",
-          headers: { Prefer: "return=representation" },
-          body: JSON.stringify({
-            name,
-            nickname: name,
-            user_id: data.user.id,
-            is_active: true,
-          }),
-        },
-        nextSession.access_token
-      );
-
-      if (!playerResponse.ok) {
-        const body = await playerResponse.text();
-        throw new Error(`PLAYER PROFILE CREATE FAILED: ${body}`);
-      }
-
-      const playerData = await playerResponse.json();
-      const createdPlayer = Array.isArray(playerData) ? playerData[0] : null;
-      if (createdPlayer?.id) {
-        const linkResponse = await supabaseFetch(
-          `/rest/v1/accounts?id=eq.${encodeURIComponent(data.user.id)}`,
-          {
-            method: "PATCH",
-            headers: { Prefer: "return=minimal" },
-            body: JSON.stringify({ player_id: createdPlayer.id }),
-          },
-          nextSession.access_token
-        );
-
-        if (!linkResponse.ok) {
-          throw new Error(`ACCOUNT PLAYER LINK FAILED: ${await linkResponse.text()}`);
-        }
-
-        setSelectedPlayerId(String(createdPlayer.id));
+      if (player?.player_id) {
+        persistSession({ ...createdSession, player_id: String(player.player_id) });
+        setSelectedPlayerId(String(player.player_id));
       }
 
       setAccountMessage("ACCOUNT CREATED. PLAYER PROFILE CREATED.");
@@ -743,7 +681,6 @@ export default function Home() {
       setAccountLoading(false);
     }
   };
-
   const login = async () => {
     const id = loginId.trim();
     if (!id || !password) {
@@ -755,27 +692,24 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-        method: "POST",
-        headers: apiHeaders(),
-        body: JSON.stringify({
-          email: accountEmail(id),
-          password,
-        }),
+      const data = await rpc("login_account", {
+        p_login_id: id,
+        p_password: password,
       });
 
-      const data = await response.json();
-
-      if (!response.ok || !data?.access_token || !data?.user?.id) {
-        throw new Error(data?.error_description || data?.msg || "LOGIN FAILED.");
+      if (!data?.access_token || !data?.user_id) {
+        throw new Error("LOGIN FAILED.");
       }
 
-      const nextSession: Session = data;
-      setSession(nextSession);
-      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+      persistSession({
+        access_token: String(data.access_token),
+        user_id: String(data.user_id),
+        login_id: String(data.login_id ?? id),
+        display_name: String(data.display_name ?? ""),
+        player_id: data.player_id ? String(data.player_id) : null,
+        is_admin: data.is_admin === true,
+      });
 
-      await syncAccount(nextSession.access_token, data.user.id, id, displayName.trim());
-      await loadAccountProfile(nextSession.access_token, data.user.id);
       setAccountMessage("LOGGED IN.");
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "LOGIN FAILED.");
@@ -783,39 +717,8 @@ export default function Home() {
       setAccountLoading(false);
     }
   };
-
-  const syncAccount = async (
-    accessToken: string,
-    userId?: string,
-    id?: string,
-    name?: string
-  ) => {
-    if (!userId) return;
-
-    const body: Record<string, unknown> = {
-      id: userId,
-      display_name: name || id || "PLAYER",
-    };
-
-    const accountResponse = await supabaseFetch(
-      "/rest/v1/accounts?on_conflict=id",
-      {
-        method: "POST",
-        headers: {
-          Prefer: "resolution=merge-duplicates,return=minimal",
-        },
-        body: JSON.stringify(body),
-      },
-      accessToken
-    );
-
-    if (!accountResponse.ok) {
-      throw new Error(`ACCOUNT SYNC FAILED: ${await accountResponse.text()}`);
-    }
-  };
-
   const linkPlayer = async () => {
-    if (!session?.access_token || !session.user?.id || !selectedPlayerId) {
+    if (!session?.access_token || !selectedPlayerId) {
       setAccountMessage("SELECT YOUR PLAYER.");
       return;
     }
@@ -824,20 +727,11 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await supabaseFetch(
-        `/rest/v1/accounts?id=eq.${encodeURIComponent(session.user.id)}`,
-        {
-          method: "PATCH",
-          headers: { Prefer: "return=minimal" },
-          body: JSON.stringify({ player_id: selectedPlayerId }),
-        },
-        session.access_token
-      );
-
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-
+      await rpc("link_player_account", {
+        p_access_token: session.access_token,
+        p_player_id: selectedPlayerId,
+      });
+      persistSession({ ...session, player_id: selectedPlayerId });
       setAccountMessage("PLAYER LINKED.");
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "PLAYER LINK FAILED.");
@@ -845,19 +739,22 @@ export default function Home() {
       setAccountLoading(false);
     }
   };
-
-  const logout = () => {
-    setSession(null);
-    setAccountIsAdmin(false);
-    setSelectedPlayerId("");
+  const logout = async () => {
+    const token = session?.access_token;
+    clearStoredSession();
     setLoginId("");
     setPassword("");
-    window.localStorage.removeItem("midnight_session");
     setAccountMessage("LOGGED OUT.");
+    if (token) {
+      try {
+        await rpc("logout_account", { p_access_token: token });
+      } catch {
+        // Local logout is already complete.
+      }
+    }
   };
-
   const openAdmin = async () => {
-    if (!session?.access_token || !session.user?.id) {
+    if (!session?.access_token) {
       setAccountMessage("LOGIN REQUIRED.");
       return;
     }
@@ -866,25 +763,15 @@ export default function Home() {
     setAccountMessage("");
 
     try {
-      const response = await supabaseFetch(
-        `/rest/v1/accounts?select=is_admin&id=eq.${encodeURIComponent(session.user.id)}&limit=1`,
-        {},
-        session.access_token
-      );
-
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-
-      const rows = await response.json();
-      const isAdmin = Array.isArray(rows) && rows[0]?.is_admin === true;
+      const data = await rpc("get_account_session", {
+        p_access_token: session.access_token,
+      });
+      const isAdmin = data?.is_admin === true;
       setAccountIsAdmin(isAdmin);
-
       if (!isAdmin) {
         setAccountMessage("ADMIN ACCESS REQUIRED.");
         return;
       }
-
       window.location.href = "/admin";
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "ADMIN CHECK FAILED.");
@@ -892,7 +779,6 @@ export default function Home() {
       setAccountLoading(false);
     }
   };
-
   const resultRowsSorted = useMemo(
     () =>
       [...resultRows].sort((a, b) => {

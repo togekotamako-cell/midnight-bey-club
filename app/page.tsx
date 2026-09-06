@@ -954,7 +954,7 @@ export default function Home() {
             <p className="eyebrow">THE NUMBERS</p>
             <h2>RANKING</h2>
           </div>
-          <span className="section-number">02</span>
+          <span className="section-number">08</span>
         </div>
 
         {rankingLoading ? (
@@ -992,7 +992,7 @@ export default function Home() {
 
             <div className="ranking-note">
               <span>CUMULATIVE POINTS</span>
-              <span>1ST 3PT / 2ND 2PT / 3RD 1PT</span>
+              <span>1ST 3PT / 2ND 2PT / 3RD 1PT · TEAM 2PT / 1PT</span>
             </div>
           </>
         )}
@@ -1014,7 +1014,7 @@ export default function Home() {
         <div className="history-content">
           <div className="history-big">
             <span>2026</span>
-            <strong>{String(historyCount).padStart(2, "0")}</strong>
+            <strong>08</strong>
           </div>
 
           <div className="history-text">
@@ -1113,7 +1113,7 @@ export default function Home() {
                 </div>
 
                 <div className="detail-block">
-                  <div className="detail-title">RESULTS</div>
+                  <div className="detail-title">3ON3 RESULTS / INDIVIDUAL · 3 BEYS</div>
 
                   {resultRowsSorted.length === 0 ? (
                     <div className="detail-no-data">NO DATA</div>
@@ -1184,9 +1184,9 @@ export default function Home() {
                   )}
                 </div>
 
-                {selectedTournament.format === "TEAM" && teamRows.length > 0 && (
+                {teamRows.length > 0 && (
                   <div className="detail-block">
-                    <div className="detail-title">TEAM RESULTS</div>
+                    <div className="detail-title">TEAM BATTLE RESULTS · 2 PT / 1 PT</div>
                     <div className="team-list">
                       {teamRows.map((team, index) => {
                         const teamId = String(team.id ?? "");

@@ -9,7 +9,7 @@ type Tournament = { id: string; name: string; date: string; location: string; st
 type Result = { id?: string; rank: number; player_id: string; player_name?: string; bey1: string; bey2: string; bey3: string; points: number };
 type Team = { id?: string; name: string; rank: 1 | 2; members: string[] };
 type Custom = { id?: string; label: string; value: string };
-type Session = { access_token: string; user: { id: string }; login_id?: string; display_name?: string; is_admin?: boolean };
+type Session = { access_token: string; user_id: string; login_id: string; display_name?: string; player_id?: string | null; is_admin?: boolean };
 
 const URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
@@ -47,10 +47,39 @@ export default function AdminPage() {
       const raw = localStorage.getItem("midnight_session");
       if (!raw) return setAuthorized(false);
       const s = JSON.parse(raw) as Session;
-      if (!s?.access_token || !s.user?.id) return setAuthorized(false);
+      if (!s?.access_token || !s.user_id) return setAuthorized(false);
       setSession(s);
     } catch { setAuthorized(false); }
   }, []);
+
+  useEffect(() => {
+    if (!session?.access_token) return;
+
+    // Custom ID/password sessions are opaque tokens, not JWTs.
+    // This RPC validates the token and extends its 30-day server-side expiry.
+    const keepAlive = () => {
+      void rpc("get_account_session", { p_access_token: session.access_token })
+        .then((info) => {
+          if (!info?.user_id) throw new Error("SESSION EXPIRED");
+        })
+        .catch(() => {
+          localStorage.removeItem("midnight_session");
+          setSession(null);
+          setAuthorized(false);
+        });
+    };
+
+    keepAlive();
+    const timer = window.setInterval(keepAlive, 10 * 60_000);
+    window.addEventListener("focus", keepAlive);
+    document.addEventListener("visibilitychange", keepAlive);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", keepAlive);
+      document.removeEventListener("visibilitychange", keepAlive);
+    };
+  }, [session]);
 
   const loadAll = async () => {
     if(!session?.access_token) return; setMessage("LOADING...");
@@ -67,9 +96,9 @@ export default function AdminPage() {
     setSelectedId(id); setLoadingDetail(true); setMessage("");
     try {
       const [rr, cr, tr] = await Promise.all([
-        api(`/rest/v1/tournament_results?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`, {}, session?.access_token),
-        api(`/rest/v1/custom_registrations?select=*&tournament_id=eq.${enc(id)}`, {}, session?.access_token),
-        api(`/rest/v1/teams?select=*&tournament_id=eq.${enc(id)}`, {}, session?.access_token),
+        api(`/rest/v1/tournament_results?select=*&tournament_id=eq.${enc(id)}&order=rank.asc`, {}),
+        api(`/rest/v1/custom_registrations?select=*&tournament_id=eq.${enc(id)}`, {}),
+        api(`/rest/v1/teams?select=*&tournament_id=eq.${enc(id)}`, {}),
       ]);
       const rrows = rr.ok ? await rr.json() : [];
       const crows = cr.ok ? await cr.json() : [];
@@ -100,7 +129,7 @@ export default function AdminPage() {
       if (Array.isArray(trows)) {
         const ids=trows.map((r:any)=>String(r.id)).filter(Boolean);
         let members:any[]=[];
-        if(ids.length){ const mr=await api(`/rest/v1/team_members?select=*&team_id=in.(${ids.map(enc).join(",")})`,{},session?.access_token); if(mr.ok) members=await mr.json(); }
+        if(ids.length){ const mr=await api(`/rest/v1/team_members?select=*&team_id=in.(${ids.map(enc).join(",")})`,{}); if(mr.ok) members=await mr.json(); }
         const loadedTeams = trows.map((r:any)=>({
           id:r.id,
           name:String(r.name??r.team_name??"TEAM"),
@@ -199,7 +228,7 @@ export default function AdminPage() {
         <div className="saveBar"><span className={message.includes("FAILED")||message.includes("ERROR")?"error":"ok"}>{loadingDetail?"LOADING...":message}</span><button className="save" onClick={save} disabled={saving}>{saving?"SAVING...":"SAVE TO DATABASE"}</button></div>
       </>}</section>
     </div>}
-    {tab==="players" && <section className="panel"><div className="sectionTitle"><span>THE NUMBERS</span><h2>PLAYERS / RANKING</h2><button className="add playerAdd" onClick={createPlayer}>+ ADD PLAYER</button></div>{sortedPlayers.length===0?<div className="empty">NO DATA</div>:<div className="playerList">{sortedPlayers.map((p,i)=><div className="player" key={p.id}><div className="rank">{String(i+1).padStart(2,"0")}</div><div><label>PLAYER</label><input value={p.name} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/></div><div><label>NICKNAME</label><input value={p.nickname??""} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,nickname:e.target.value}:x))}/></div><div className="stat"><span>PTS</span><input className="pointsInput" type="number" value={p.points??0} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,points:Number(e.target.value)||0}:x))}/></div><div className="stat"><span>WINS</span><strong>{p.wins??0}</strong></div><div className="stat"><span>EVENTS</span><strong>{p.tournaments??0}</strong></div></div>)}</div>}<div className="saveArea"><span className="saved">CUMULATIVE POINTS · 3 / 2 / 1 · TEAM 2 / 1</span><button className="save" onClick={async()=>{setSaving(true);try{for(const p of players){await rpc("admin_update_player",{p_access_token:session?.access_token,p_player_id:p.id,p_name:p.name,p_nickname:p.nickname??"",p_points:Number(p.points??0)})}setMessage("PLAYERS SAVED.")}catch(e){setMessage(errText(e))}finally{setSaving(false)}}} disabled={saving}>{saving?"SAVING...":"SAVE PLAYERS"}</button></div></section>}
+    {tab==="players" && <section className="panel"><div className="sectionTitle"><span>THE NUMBERS</span><h2>PLAYERS / RANKING</h2><button className="add playerAdd" onClick={createPlayer}>+ ADD PLAYER</button></div>{sortedPlayers.length===0?<div className="empty">NO DATA</div>:<div className="playerList">{sortedPlayers.map((p,i)=><div className="player" key={p.id}><div className="rank">{String(i+1).padStart(2,"0")}</div><div><label>PLAYER</label><input value={p.name} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,name:e.target.value}:x))}/></div><div><label>NICKNAME</label><input value={p.nickname??""} onChange={e=>setPlayers(v=>v.map(x=>x.id===p.id?{...x,nickname:e.target.value}:x))}/></div><div className="stat"><span>PTS</span><strong>{p.points??0}</strong></div><div className="stat"><span>WINS</span><strong>{p.wins??0}</strong></div><div className="stat"><span>EVENTS</span><strong>{p.tournaments??0}</strong></div></div>)}</div>}<div className="saveArea"><span className="saved">POINTS ARE CALCULATED AUTOMATICALLY · 3 / 2 / 1 · TEAM 2 / 1</span><button className="save" onClick={async()=>{setSaving(true);try{for(const p of players){await rpc("admin_update_player",{p_access_token:session?.access_token,p_player_id:p.id,p_name:p.name,p_nickname:p.nickname??"",p_points:Number(p.points??0)})}setMessage("PLAYERS SAVED.")}catch(e){setMessage(errText(e))}finally{setSaving(false)}}} disabled={saving}>{saving?"SAVING...":"SAVE PLAYERS"}</button></div></section>}
     <style jsx global>{styles}</style>
   </main>;
 }

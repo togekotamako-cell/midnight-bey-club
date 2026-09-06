@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 type TournamentStatus = "ENTRY OPEN" | "UPCOMING" | "FINISHED" | "NO DATA";
@@ -32,6 +32,7 @@ type Session = {
   refresh_token?: string;
   expires_in?: number;
   expires_at?: number;
+  token_type?: string;
   user?: {
     id: string;
     email?: string;
@@ -319,30 +320,30 @@ export default function Home() {
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
-  useEffect(() => {
-    const saved =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("midnight_session")
-        : null;
+  const persistSession = (nextSession: Session) => {
+    const normalized: Session = {
+      ...nextSession,
+      expires_at:
+        nextSession.expires_at ??
+        (nextSession.expires_in
+          ? Math.floor(Date.now() / 1000) + nextSession.expires_in
+          : undefined),
+    };
 
-    if (saved) {
-      try {
-        setSession(JSON.parse(saved));
-      } catch {
-        window.localStorage.removeItem("midnight_session");
-      }
-    }
-  }, []);
+    setSession(normalized);
+    window.localStorage.setItem("midnight_session", JSON.stringify(normalized));
+    return normalized;
+  };
 
-  const refreshInFlight = useRef(false);
+  const clearStoredSession = () => {
+    setSession(null);
+    setAccountIsAdmin(false);
+    setSelectedPlayerId("");
+    window.localStorage.removeItem("midnight_session");
+  };
 
-  const refreshSession = async (currentSession?: Session | null) => {
-    const activeSession = currentSession ?? session;
-    const refreshToken = activeSession?.refresh_token;
-
-    if (!refreshToken || refreshInFlight.current) return activeSession ?? null;
-
-    refreshInFlight.current = true;
+  const refreshSession = async (current: Session) => {
+    if (!current.refresh_token) return null;
 
     try {
       const response = await fetch(
@@ -350,40 +351,95 @@ export default function Home() {
         {
           method: "POST",
           headers: apiHeaders(),
-          body: JSON.stringify({ refresh_token: refreshToken }),
+          body: JSON.stringify({ refresh_token: current.refresh_token }),
+          cache: "no-store",
         }
       );
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
 
-      if (!response.ok || !data?.access_token || !data?.user?.id) {
+      if (!response.ok || !data?.access_token) {
         throw new Error(
-          data?.error_description ||
-            data?.msg ||
-            "SESSION REFRESH FAILED."
+          data?.error_description || data?.msg || "SESSION REFRESH FAILED."
         );
       }
 
-      const nextSession: Session = {
-        ...data,
-        refresh_token: data.refresh_token || refreshToken,
-      };
-
-      setSession(nextSession);
-      window.localStorage.setItem(
-        "midnight_session",
-        JSON.stringify(nextSession)
-      );
-
-      await loadAccountProfile(nextSession.access_token, data.user.id);
-      return nextSession;
+      return persistSession(data as Session);
     } catch (error) {
-      console.warn("Automatic session refresh failed.", error);
-      return activeSession ?? null;
-    } finally {
-      refreshInFlight.current = false;
+      console.warn("Session refresh failed.", error);
+      clearStoredSession();
+      return null;
     }
   };
+
+  useEffect(() => {
+    const saved =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("midnight_session")
+        : null;
+
+    if (!saved) return;
+
+    try {
+      const parsed = JSON.parse(saved) as Session;
+      if (!parsed?.access_token) throw new Error("INVALID SESSION");
+
+      const expiresAt = parsed.expires_at;
+      const expired =
+        typeof expiresAt === "number" &&
+        expiresAt <= Math.floor(Date.now() / 1000);
+
+      if (expired && parsed.refresh_token) {
+        void refreshSession(parsed);
+      } else if (!expired) {
+        setSession(parsed);
+      } else {
+        clearStoredSession();
+      }
+    } catch {
+      clearStoredSession();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session?.refresh_token) return;
+
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+
+      const expiresAt = session.expires_at;
+      const now = Date.now();
+      const refreshAt =
+        typeof expiresAt === "number"
+          ? Math.max(5_000, expiresAt * 1000 - now - 60_000)
+          : 50 * 60_000;
+
+      refreshTimer = setTimeout(async () => {
+        const refreshed = await refreshSession(session);
+        if (refreshed) scheduleRefresh();
+      }, refreshAt);
+    };
+
+    scheduleRefresh();
+
+    const onFocus = () => {
+      const expiresAt = session.expires_at;
+      if (typeof expiresAt === "number" && expiresAt * 1000 - Date.now() < 2 * 60_000) {
+        void refreshSession(session);
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [session]);
 
   const loadAccountProfile = async (accessToken: string, userId: string) => {
     try {
@@ -415,57 +471,6 @@ export default function Home() {
     if (session?.access_token && session.user?.id) {
       loadAccountProfile(session.access_token, session.user.id);
     }
-  }, [session]);
-
-  // Keep the member session alive automatically. Supabase access tokens are
-  // short-lived, so refresh before expiry and again whenever the tab becomes active.
-  useEffect(() => {
-    if (!session?.refresh_token) return;
-
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const scheduleRefresh = (active: Session) => {
-      if (cancelled) return;
-
-      const now = Math.floor(Date.now() / 1000);
-      const expiresAt =
-        active.expires_at ??
-        (active.expires_in ? now + active.expires_in : now + 3600);
-
-      // Refresh 5 minutes before expiry, with a minimum 30-second delay.
-      const delay = Math.max((expiresAt - now - 300) * 1000, 30_000);
-
-      timer = window.setTimeout(async () => {
-        const refreshed = await refreshSession(active);
-        if (!cancelled && refreshed) scheduleRefresh(refreshed);
-      }, delay);
-    };
-
-    const handleVisibility = async () => {
-      if (document.visibilityState !== "visible") return;
-
-      const now = Math.floor(Date.now() / 1000);
-      const expiresAt =
-        session.expires_at ??
-        (session.expires_in ? now + session.expires_in : now + 3600);
-
-      if (expiresAt - now <= 300) {
-        const refreshed = await refreshSession(session);
-        if (!cancelled && refreshed) {
-          scheduleRefresh(refreshed);
-        }
-      }
-    };
-
-    scheduleRefresh(session);
-    document.addEventListener("visibilitychange", handleVisibility);
-
-    return () => {
-      cancelled = true;
-      if (timer) window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
   }, [session]);
 
   useEffect(() => {
@@ -535,7 +540,14 @@ export default function Home() {
       }
     };
 
-    loadData();
+    void loadData();
+
+    // Keep public tournament/ranking data fresh without a manual reload.
+    const refreshTimer = window.setInterval(() => {
+      void loadData();
+    }, 30_000);
+
+    return () => window.clearInterval(refreshTimer);
   }, []);
 
   const openTournament = async (tournament: Tournament) => {
@@ -691,9 +703,7 @@ export default function Home() {
         return;
       }
 
-      const nextSession: Session = data;
-      setSession(nextSession);
-      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+      const nextSession = persistSession(data as Session);
 
       await syncAccount(nextSession.access_token, data.user.id, id, name);
 
@@ -771,9 +781,7 @@ export default function Home() {
         throw new Error(data?.error_description || data?.msg || "LOGIN FAILED.");
       }
 
-      const nextSession: Session = data;
-      setSession(nextSession);
-      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
+      const nextSession = persistSession(data as Session);
 
       await syncAccount(nextSession.access_token, data.user.id, id, displayName.trim());
       await loadAccountProfile(nextSession.access_token, data.user.id);

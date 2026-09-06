@@ -30,8 +30,8 @@ type ResultRow = Record<string, unknown>;
 type Session = {
   access_token: string;
   refresh_token?: string;
-  expires_in?: number;
   expires_at?: number;
+  expires_in?: number;
   token_type?: string;
   user?: {
     id: string;
@@ -72,12 +72,20 @@ const fallbackTournaments: Tournament[] = [
 const emptyPlayers: Player[] = [];
 
 function apiHeaders(accessToken?: string) {
-  const token = accessToken || SUPABASE_ANON_KEY;
-  return {
+  const headers: Record<string, string> = {
     apikey: SUPABASE_ANON_KEY,
-    Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
+
+  // Supabase publishable keys (sb_publishable_...) are not JWTs and must
+  // NOT be sent as a Bearer token to PostgREST. Only a real user access
+  // token belongs in Authorization. This prevents PGRST301 "Expected 3
+  // parts in JWT" errors on account/player operations.
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
+
+  return headers;
 }
 
 async function supabaseFetch(
@@ -320,126 +328,112 @@ export default function Home() {
 
   const [rankingLoading, setRankingLoading] = useState(true);
 
-  const persistSession = (nextSession: Session) => {
-    const normalized: Session = {
-      ...nextSession,
-      expires_at:
-        nextSession.expires_at ??
-        (nextSession.expires_in
-          ? Math.floor(Date.now() / 1000) + nextSession.expires_in
-          : undefined),
-    };
-
-    setSession(normalized);
-    window.localStorage.setItem("midnight_session", JSON.stringify(normalized));
-    return normalized;
-  };
-
-  const clearStoredSession = () => {
-    setSession(null);
-    setAccountIsAdmin(false);
-    setSelectedPlayerId("");
-    window.localStorage.removeItem("midnight_session");
-  };
-
-  const refreshSession = async (current: Session) => {
-    if (!current.refresh_token) return null;
-
-    try {
-      const response = await fetch(
-        `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
-        {
-          method: "POST",
-          headers: apiHeaders(),
-          body: JSON.stringify({ refresh_token: current.refresh_token }),
-          cache: "no-store",
-        }
-      );
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok || !data?.access_token) {
-        throw new Error(
-          data?.error_description || data?.msg || "SESSION REFRESH FAILED."
-        );
-      }
-
-      return persistSession(data as Session);
-    } catch (error) {
-      console.warn("Session refresh failed.", error);
-      clearStoredSession();
-      return null;
-    }
-  };
-
   useEffect(() => {
-    const saved =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("midnight_session")
-        : null;
+    let cancelled = false;
 
-    if (!saved) return;
-
-    try {
-      const parsed = JSON.parse(saved) as Session;
-      if (!parsed?.access_token) throw new Error("INVALID SESSION");
-
-      const expiresAt = parsed.expires_at;
-      const expired =
-        typeof expiresAt === "number" &&
-        expiresAt <= Math.floor(Date.now() / 1000);
-
-      if (expired && parsed.refresh_token) {
-        void refreshSession(parsed);
-      } else if (!expired) {
-        setSession(parsed);
+    const saveSession = (next: Session | null) => {
+      if (cancelled) return;
+      setSession(next);
+      if (next) {
+        window.localStorage.setItem("midnight_session", JSON.stringify(next));
       } else {
-        clearStoredSession();
-      }
-    } catch {
-      clearStoredSession();
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!session?.refresh_token) return;
-
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const scheduleRefresh = () => {
-      if (refreshTimer) clearTimeout(refreshTimer);
-
-      const expiresAt = session.expires_at;
-      const now = Date.now();
-      const refreshAt =
-        typeof expiresAt === "number"
-          ? Math.max(5_000, expiresAt * 1000 - now - 60_000)
-          : 50 * 60_000;
-
-      refreshTimer = setTimeout(async () => {
-        const refreshed = await refreshSession(session);
-        if (refreshed) scheduleRefresh();
-      }, refreshAt);
-    };
-
-    scheduleRefresh();
-
-    const onFocus = () => {
-      const expiresAt = session.expires_at;
-      if (typeof expiresAt === "number" && expiresAt * 1000 - Date.now() < 2 * 60_000) {
-        void refreshSession(session);
+        window.localStorage.removeItem("midnight_session");
       }
     };
 
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
+    const refreshSession = async (current: Session): Promise<Session | null> => {
+      if (!current.refresh_token) return current;
+
+      try {
+        const response = await fetch(
+          `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,
+          {
+            method: "POST",
+            headers: apiHeaders(),
+            body: JSON.stringify({ refresh_token: current.refresh_token }),
+          }
+        );
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok || !data?.access_token) {
+          console.warn("SESSION REFRESH FAILED", data);
+          return null;
+        }
+
+        const next: Session = {
+          ...current,
+          ...data,
+          user: data.user ?? current.user,
+        };
+        saveSession(next);
+        return next;
+      } catch (error) {
+        console.warn("SESSION REFRESH ERROR", error);
+        return null;
+      }
+    };
+
+    const restore = async () => {
+      const saved = window.localStorage.getItem("midnight_session");
+      if (!saved) return;
+
+      try {
+        const current = JSON.parse(saved) as Session;
+        const expiresAt = Number(current.expires_at ?? 0);
+        const needsRefresh = expiresAt > 0 && expiresAt * 1000 <= Date.now() + 60_000;
+
+        if (needsRefresh) {
+          const refreshed = await refreshSession(current);
+          if (!refreshed && !cancelled) saveSession(null);
+        } else if (!cancelled) {
+          setSession(current);
+        }
+      } catch {
+        window.localStorage.removeItem("midnight_session");
+      }
+    };
+
+    restore();
+
+    // Keep the login alive automatically. Refresh roughly every 5 minutes,
+    // and also immediately when the tab becomes visible again.
+    const timer = window.setInterval(async () => {
+      const saved = window.localStorage.getItem("midnight_session");
+      if (!saved) return;
+      try {
+        const current = JSON.parse(saved) as Session;
+        const expiresAt = Number(current.expires_at ?? 0);
+        if (!expiresAt || expiresAt * 1000 <= Date.now() + 5 * 60_000) {
+          await refreshSession(current);
+        }
+      } catch {
+        window.localStorage.removeItem("midnight_session");
+      }
+    }, 5 * 60 * 1000);
+
+    const onVisibility = async () => {
+      if (document.visibilityState !== "visible") return;
+      const saved = window.localStorage.getItem("midnight_session");
+      if (!saved) return;
+      try {
+        const current = JSON.parse(saved) as Session;
+        const expiresAt = Number(current.expires_at ?? 0);
+        if (!expiresAt || expiresAt * 1000 <= Date.now() + 5 * 60_000) {
+          await refreshSession(current);
+        }
+      } catch {
+        window.localStorage.removeItem("midnight_session");
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
-      if (refreshTimer) clearTimeout(refreshTimer);
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [session]);
+  }, []);
 
   const loadAccountProfile = async (accessToken: string, userId: string) => {
     try {
@@ -540,14 +534,7 @@ export default function Home() {
       }
     };
 
-    void loadData();
-
-    // Keep public tournament/ranking data fresh without a manual reload.
-    const refreshTimer = window.setInterval(() => {
-      void loadData();
-    }, 30_000);
-
-    return () => window.clearInterval(refreshTimer);
+    loadData();
   }, []);
 
   const openTournament = async (tournament: Tournament) => {
@@ -703,7 +690,9 @@ export default function Home() {
         return;
       }
 
-      const nextSession = persistSession(data as Session);
+      const nextSession: Session = data;
+      setSession(nextSession);
+      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
 
       await syncAccount(nextSession.access_token, data.user.id, id, name);
 
@@ -781,7 +770,9 @@ export default function Home() {
         throw new Error(data?.error_description || data?.msg || "LOGIN FAILED.");
       }
 
-      const nextSession = persistSession(data as Session);
+      const nextSession: Session = data;
+      setSession(nextSession);
+      window.localStorage.setItem("midnight_session", JSON.stringify(nextSession));
 
       await syncAccount(nextSession.access_token, data.user.id, id, displayName.trim());
       await loadAccountProfile(nextSession.access_token, data.user.id);
